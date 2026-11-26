@@ -71,6 +71,14 @@
 		79F1BEF9AB57C405C3C8D2E0 = {isa = PBXBuildFile; fileRef = 9365B9A7FD7107BF71FC280C; };
 		EB169C0F186308016C6EF54F = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingsView.swift; sourceTree = "<group>"; };
 		28C4C41A603BDA7FC4644BB3 = {isa = PBXBuildFile; fileRef = EB169C0F186308016C6EF54F; };
+		97557199660FEB9EB23312F5 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSPlaylist.swift; sourceTree = "<group>"; };
+		137D5BD8EB859F6BF0422082 = {isa = PBXBuildFile; fileRef = 97557199660FEB9EB23312F5; };
+		2E6EE97B679FC2D7DE7F28B4 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveRecorder.swift; sourceTree = "<group>"; };
+		849E46E9D972D303CCAAD784 = {isa = PBXBuildFile; fileRef = 2E6EE97B679FC2D7DE7F28B4; };
+		85A7A0D8F7503DCF06987A0F = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingStore.swift; sourceTree = "<group>"; };
+		116B047CCF1ED691D7C96167 = {isa = PBXBuildFile; fileRef = 85A7A0D8F7503DCF06987A0F; };
+		5CB068548F3734D5AD54935A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingPlayerView.swift; sourceTree = "<group>"; };
+		E7D2732670853949CB78E237 = {isa = PBXBuildFile; fileRef = 5CB068548F3734D5AD54935A; };
 		9E0C475DFB03D0E58115FBF6 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveRoomView.swift; sourceTree = "<group>"; };
 		33C5ADB9EDD44D4BEF165642 = {isa = PBXBuildFile; fileRef = 9E0C475DFB03D0E58115FBF6; };
 		11533A1166409B1AFFA444E4 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomCard.swift; sourceTree = "<group>"; };
@@ -174,6 +182,17 @@
 			path = Storage;
 			sourceTree = "<group>";
 		};
+		D18B817A5638D754830F3994 = {
+			isa = PBXGroup;
+			children = (
+				97557199660FEB9EB23312F5,
+				2E6EE97B679FC2D7DE7F28B4,
+				85A7A0D8F7503DCF06987A0F,
+			);
+			name = Recorder;
+			path = Recorder;
+			sourceTree = "<group>";
+		};
 		4CEC6835386DE4704668B415 = {
 			isa = PBXGroup;
 			children = (
@@ -205,6 +224,7 @@
 			isa = PBXGroup;
 			children = (
 				EB169C0F186308016C6EF54F,
+				5CB068548F3734D5AD54935A,
 			);
 			name = Recordings;
 			path = Recordings;
@@ -266,6 +286,7 @@
 				4263957B4D93EA5617C2FA95,
 				537D51A7B63624CD653391B4,
 				BF85A818CBD222B5A13A22CF,
+				D18B817A5638D754830F3994,
 			);
 			name = Core;
 			path = Core;
@@ -349,6 +370,10 @@
 				7BD2DCB8A5A46175BF4974CC,
 				79F1BEF9AB57C405C3C8D2E0,
 				28C4C41A603BDA7FC4644BB3,
+				137D5BD8EB859F6BF0422082,
+				849E46E9D972D303CCAAD784,
+				116B047CCF1ED691D7C96167,
+				E7D2732670853949CB78E237,
 				33C5ADB9EDD44D4BEF165642,
 				CCB32786AC313A044440493E,
 				8209D3F5A6F84A50E183D1C4,
