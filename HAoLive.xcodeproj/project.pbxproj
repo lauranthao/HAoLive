@@ -1,0 +1,547 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+		BCE07729543255A3F6267DFD = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HAoLiveApp.swift; sourceTree = "<group>"; };
+		A401E3B79E43EF51C13B4A8C = {isa = PBXBuildFile; fileRef = BCE07729543255A3F6267DFD; };
+		8588BC3047355B7AC0FA5FEC = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
+		ADCCB87A203EB328894EF11B = {isa = PBXBuildFile; fileRef = 8588BC3047355B7AC0FA5FEC; };
+		7C7B7FEFD173C645C2DA6DBB = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePlatform.swift; sourceTree = "<group>"; };
+		AF82D996DCB6E0263E391F9F = {isa = PBXBuildFile; fileRef = 7C7B7FEFD173C645C2DA6DBB; };
+		B25BD12BD728690D337903C7 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveRoom.swift; sourceTree = "<group>"; };
+		93E3273425350C6393B42905 = {isa = PBXBuildFile; fileRef = B25BD12BD728690D337903C7; };
+		7C6F785F9183F553C1321CB5 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCategory.swift; sourceTree = "<group>"; };
+		E67D3B785D35CE6F0E717DA3 = {isa = PBXBuildFile; fileRef = 7C6F785F9183F553C1321CB5; };
+		CC4293B3599F4EB73127A528 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DanmakuItem.swift; sourceTree = "<group>"; };
+		CD3354AB7EDF6811B6FB5061 = {isa = PBXBuildFile; fileRef = CC4293B3599F4EB73127A528; };
+		E6BBFAAAA57BCBBA269A0627 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayQuality.swift; sourceTree = "<group>"; };
+		D2D4285D5EA1427A36F4FDFD = {isa = PBXBuildFile; fileRef = E6BBFAAAA57BCBBA269A0627; };
+		8B32DECCC6E68C3A67B8D455 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSite.swift; sourceTree = "<group>"; };
+		9FEDB5C389EEF0F11E675D43 = {isa = PBXBuildFile; fileRef = 8B32DECCC6E68C3A67B8D455; };
+		C24E42768343B00ACCACD44D = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomSearchMerger.swift; sourceTree = "<group>"; };
+		ED7B8B495587FBBF94DCE5B5 = {isa = PBXBuildFile; fileRef = C24E42768343B00ACCACD44D; };
+		12CCE6CC94A40ABC6778DF09 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StubSite.swift; sourceTree = "<group>"; };
+		E2354EA357A415FAF810018F = {isa = PBXBuildFile; fileRef = 12CCE6CC94A40ABC6778DF09; };
+		BCF428B5F346F42940962225 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BilibiliSite.swift; sourceTree = "<group>"; };
+		8E874BCC2CCE467B4F7EE569 = {isa = PBXBuildFile; fileRef = BCF428B5F346F42940962225; };
+		FAA93D0DE0EBCA03E16D9CD9 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyuSite.swift; sourceTree = "<group>"; };
+		42836DA9C0C683605BF14DC8 = {isa = PBXBuildFile; fileRef = FAA93D0DE0EBCA03E16D9CD9; };
+		0669065BA5D0C0BFA9D18C02 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuyaSite.swift; sourceTree = "<group>"; };
+		9FAA5E934521E3C0957CDE97 = {isa = PBXBuildFile; fileRef = 0669065BA5D0C0BFA9D18C02; };
+		FE23005CDA30DF78C2B43C0A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinSite.swift; sourceTree = "<group>"; };
+		7D46805FA3989B642787DFB9 = {isa = PBXBuildFile; fileRef = FE23005CDA30DF78C2B43C0A; };
+		E132575FBD9AC65695E13995 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KuaishouSite.swift; sourceTree = "<group>"; };
+		176A5498C32BF8250AEA446F = {isa = PBXBuildFile; fileRef = E132575FBD9AC65695E13995; };
+		14E5B08D85936E933FF61E1A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SiteRegistry.swift; sourceTree = "<group>"; };
+		2B654FC587947F691FABB5D2 = {isa = PBXBuildFile; fileRef = 14E5B08D85936E933FF61E1A; };
+		259CC766ABE622587BC59278 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DanmakuEngine.swift; sourceTree = "<group>"; };
+		5BA1E4CE48362180AF08F9FD = {isa = PBXBuildFile; fileRef = 259CC766ABE622587BC59278; };
+		89ED69F9FF508AE7EE769E5C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePlayerService.swift; sourceTree = "<group>"; };
+		2D7FBD39E2A07F5B76FB3C7A = {isa = PBXBuildFile; fileRef = 89ED69F9FF508AE7EE769E5C; };
+		87C27D7D6E8F23741D6DD38A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesStore.swift; sourceTree = "<group>"; };
+		C72003B663B760C3E09BD7C5 = {isa = PBXBuildFile; fileRef = 87C27D7D6E8F23741D6DD38A; };
+		8BA8B8CD320A38089CEF53C9 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
+		109763D21E817FE8E588F0D1 = {isa = PBXBuildFile; fileRef = 8BA8B8CD320A38089CEF53C9; };
+		6B51CC1EE8B2DC11E9C17A82 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStore.swift; sourceTree = "<group>"; };
+		80E96D5C9B612A450F3A94F4 = {isa = PBXBuildFile; fileRef = 6B51CC1EE8B2DC11E9C17A82; };
+		BCFB364574956BFDE5F2EB47 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesView.swift; sourceTree = "<group>"; };
+		206C18CE94596F3050E8FB46 = {isa = PBXBuildFile; fileRef = BCFB364574956BFDE5F2EB47; };
+		6BFB31E5838C4F385B06F9C0 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotView.swift; sourceTree = "<group>"; };
+		7BD2DCB8A5A46175BF4974CC = {isa = PBXBuildFile; fileRef = 6BFB31E5838C4F385B06F9C0; };
+		9365B9A7FD7107BF71FC280C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CategoriesView.swift; sourceTree = "<group>"; };
+		79F1BEF9AB57C405C3C8D2E0 = {isa = PBXBuildFile; fileRef = 9365B9A7FD7107BF71FC280C; };
+		EB169C0F186308016C6EF54F = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingsView.swift; sourceTree = "<group>"; };
+		28C4C41A603BDA7FC4644BB3 = {isa = PBXBuildFile; fileRef = EB169C0F186308016C6EF54F; };
+		9E0C475DFB03D0E58115FBF6 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveRoomView.swift; sourceTree = "<group>"; };
+		33C5ADB9EDD44D4BEF165642 = {isa = PBXBuildFile; fileRef = 9E0C475DFB03D0E58115FBF6; };
+		11533A1166409B1AFFA444E4 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomCard.swift; sourceTree = "<group>"; };
+		CCB32786AC313A044440493E = {isa = PBXBuildFile; fileRef = 11533A1166409B1AFFA444E4; };
+		41E2CA19008E4095446DFDD3 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
+		8209D3F5A6F84A50E183D1C4 = {isa = PBXBuildFile; fileRef = 41E2CA19008E4095446DFDD3; };
+		128876BA9CB203F0B32BD069 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		5B33481624F92B96350984A9 = {isa = PBXBuildFile; fileRef = 128876BA9CB203F0B32BD069; };
+		AB14EAB4053A91556FE61A1A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DanmakuOverlayView.swift; sourceTree = "<group>"; };
+		0D40596E74CCDE7CD3E1C01E = {isa = PBXBuildFile; fileRef = AB14EAB4053A91556FE61A1A; };
+		0FAFE1FB4EFC8A9AFB3E6469 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityPickerView.swift; sourceTree = "<group>"; };
+		8A0F735D55186E041D5AFAF2 = {isa = PBXBuildFile; fileRef = 0FAFE1FB4EFC8A9AFB3E6469; };
+		2309B3716923971CC587AAC9 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokens.swift; sourceTree = "<group>"; };
+		D45767DE9BE5EFBAF1322F33 = {isa = PBXBuildFile; fileRef = 2309B3716923971CC587AAC9; };
+		E17880A312A4AE0F1F118119 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		8D7172619DB15AD08404D409 = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A74D3F0F546C24E1AD1BFE96 = {isa = PBXBuildFile; fileRef = 8D7172619DB15AD08404D409; };
+		ABFCD27E129B273B9A8FE19D = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HAoLive.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D1D0524B025E57AFFF263442 = {
+			isa = PBXGroup;
+			children = (
+				BCE07729543255A3F6267DFD,
+				8588BC3047355B7AC0FA5FEC,
+			);
+			name = App;
+			path = App;
+			sourceTree = "<group>";
+		};
+		55E15E5CE1D91BA1D8A39394 = {
+			isa = PBXGroup;
+			children = (
+				7C7B7FEFD173C645C2DA6DBB,
+				B25BD12BD728690D337903C7,
+				7C6F785F9183F553C1321CB5,
+				CC4293B3599F4EB73127A528,
+				E6BBFAAAA57BCBBA269A0627,
+			);
+			name = Models;
+			path = Models;
+			sourceTree = "<group>";
+		};
+		4263957B4D93EA5617C2FA95 = {
+			isa = PBXGroup;
+			children = (
+				8B32DECCC6E68C3A67B8D455,
+				C24E42768343B00ACCACD44D,
+				12CCE6CC94A40ABC6778DF09,
+				BCF428B5F346F42940962225,
+				FAA93D0DE0EBCA03E16D9CD9,
+				0669065BA5D0C0BFA9D18C02,
+				FE23005CDA30DF78C2B43C0A,
+				E132575FBD9AC65695E13995,
+				14E5B08D85936E933FF61E1A,
+			);
+			name = Sites;
+			path = Sites;
+			sourceTree = "<group>";
+		};
+		537D51A7B63624CD653391B4 = {
+			isa = PBXGroup;
+			children = (
+				259CC766ABE622587BC59278,
+				89ED69F9FF508AE7EE769E5C,
+			);
+			name = Player;
+			path = Player;
+			sourceTree = "<group>";
+		};
+		BF85A818CBD222B5A13A22CF = {
+			isa = PBXGroup;
+			children = (
+				87C27D7D6E8F23741D6DD38A,
+				8BA8B8CD320A38089CEF53C9,
+				6B51CC1EE8B2DC11E9C17A82,
+			);
+			name = Storage;
+			path = Storage;
+			sourceTree = "<group>";
+		};
+		4CEC6835386DE4704668B415 = {
+			isa = PBXGroup;
+			children = (
+				BCFB364574956BFDE5F2EB47,
+			);
+			name = Favorites;
+			path = Favorites;
+			sourceTree = "<group>";
+		};
+		A913BFE13E39847FAD773DC2 = {
+			isa = PBXGroup;
+			children = (
+				6BFB31E5838C4F385B06F9C0,
+			);
+			name = Hot;
+			path = Hot;
+			sourceTree = "<group>";
+		};
+		0B910740E9F7FE9E9C373ADA = {
+			isa = PBXGroup;
+			children = (
+				9365B9A7FD7107BF71FC280C,
+			);
+			name = Categories;
+			path = Categories;
+			sourceTree = "<group>";
+		};
+		EA3A65B86AF9607EE0BD9704 = {
+			isa = PBXGroup;
+			children = (
+				EB169C0F186308016C6EF54F,
+			);
+			name = Recordings;
+			path = Recordings;
+			sourceTree = "<group>";
+		};
+		2654D6008554C4E75CE6FF27 = {
+			isa = PBXGroup;
+			children = (
+				9E0C475DFB03D0E58115FBF6,
+				11533A1166409B1AFFA444E4,
+			);
+			name = Room;
+			path = Room;
+			sourceTree = "<group>";
+		};
+		5C93415700405E4C4DF85C7C = {
+			isa = PBXGroup;
+			children = (
+				41E2CA19008E4095446DFDD3,
+			);
+			name = Search;
+			path = Search;
+			sourceTree = "<group>";
+		};
+		2C3495591E10CB2A6AB17552 = {
+			isa = PBXGroup;
+			children = (
+				128876BA9CB203F0B32BD069,
+			);
+			name = Settings;
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		601814408394C0737C5E3900 = {
+			isa = PBXGroup;
+			children = (
+				AB14EAB4053A91556FE61A1A,
+				0FAFE1FB4EFC8A9AFB3E6469,
+			);
+			name = Shared;
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		88F6051D365956F1766DE80E = {
+			isa = PBXGroup;
+			children = (
+				2309B3716923971CC587AAC9,
+			);
+			name = DesignSystem;
+			path = DesignSystem;
+			sourceTree = "<group>";
+		};
+		35D315DEBBF45F223B169A61 = {
+			isa = PBXGroup;
+			children = (
+				55E15E5CE1D91BA1D8A39394,
+				4263957B4D93EA5617C2FA95,
+				537D51A7B63624CD653391B4,
+				BF85A818CBD222B5A13A22CF,
+			);
+			name = Core;
+			path = Core;
+			sourceTree = "<group>";
+		};
+		984D844B917CCD4C29DE2A97 = {
+			isa = PBXGroup;
+			children = (
+				4CEC6835386DE4704668B415,
+				A913BFE13E39847FAD773DC2,
+				0B910740E9F7FE9E9C373ADA,
+				EA3A65B86AF9607EE0BD9704,
+				2654D6008554C4E75CE6FF27,
+				5C93415700405E4C4DF85C7C,
+				2C3495591E10CB2A6AB17552,
+				601814408394C0737C5E3900,
+			);
+			name = Features;
+			path = Features;
+			sourceTree = "<group>";
+		};
+		887A6F90336FF23D95C3914B = {
+			isa = PBXGroup;
+			children = (
+				E17880A312A4AE0F1F118119,
+				8D7172619DB15AD08404D409,
+			);
+			name = Resources;
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		162414DF0C274B0B38E02258 = {
+			isa = PBXGroup;
+			children = (
+				D1D0524B025E57AFFF263442,
+				35D315DEBBF45F223B169A61,
+				88F6051D365956F1766DE80E,
+				984D844B917CCD4C29DE2A97,
+				887A6F90336FF23D95C3914B,
+			);
+			name = HAoLive;
+			path = Sources/HAoLive;
+			sourceTree = "<group>";
+		};
+		518DA81DB9B99529C0C0AEBE = {isa = PBXGroup; children = (162414DF0C274B0B38E02258, 2F3A6B1E78F896718625FF06,); sourceTree = "<group>"; };
+		2F3A6B1E78F896718625FF06 = {isa = PBXGroup; children = (ABFCD27E129B273B9A8FE19D,); name = Products; sourceTree = "<group>"; };
+		7A70D71C385290AF96BF1031 = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A401E3B79E43EF51C13B4A8C,,
+				ADCCB87A203EB328894EF11B,,
+				AF82D996DCB6E0263E391F9F,,
+				93E3273425350C6393B42905,,
+				E67D3B785D35CE6F0E717DA3,,
+				CD3354AB7EDF6811B6FB5061,,
+				D2D4285D5EA1427A36F4FDFD,,
+				9FEDB5C389EEF0F11E675D43,,
+				ED7B8B495587FBBF94DCE5B5,,
+				E2354EA357A415FAF810018F,,
+				8E874BCC2CCE467B4F7EE569,,
+				42836DA9C0C683605BF14DC8,,
+				9FAA5E934521E3C0957CDE97,,
+				7D46805FA3989B642787DFB9,,
+				176A5498C32BF8250AEA446F,,
+				2B654FC587947F691FABB5D2,,
+				5BA1E4CE48362180AF08F9FD,,
+				2D7FBD39E2A07F5B76FB3C7A,,
+				C72003B663B760C3E09BD7C5,,
+				109763D21E817FE8E588F0D1,,
+				80E96D5C9B612A450F3A94F4,,
+				206C18CE94596F3050E8FB46,,
+				7BD2DCB8A5A46175BF4974CC,,
+				79F1BEF9AB57C405C3C8D2E0,,
+				28C4C41A603BDA7FC4644BB3,,
+				33C5ADB9EDD44D4BEF165642,,
+				CCB32786AC313A044440493E,,
+				8209D3F5A6F84A50E183D1C4,,
+				5B33481624F92B96350984A9,,
+				0D40596E74CCDE7CD3E1C01E,,
+				8A0F735D55186E041D5AFAF2,,
+				D45767DE9BE5EFBAF1322F33,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		424153ED3CD079DB4DB459AF = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		285BB1C1430063331E9F5DD0 = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A74D3F0F546C24E1AD1BFE96,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C7EF1AF98753AB2502399BFB = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F2F62AAE534BA46EC59716F3;
+			buildPhases = (
+				7A70D71C385290AF96BF1031,
+				424153ED3CD079DB4DB459AF,
+				285BB1C1430063331E9F5DD0,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HAoLive;
+			productName = HAoLive;
+			productReference = ABFCD27E129B273B9A8FE19D;
+			productType = "com.apple.product-type.application";
+		};
+		7D179E7F3DBD9906E29C793B = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					C7EF1AF98753AB2502399BFB = {
+						CreatedOnToolsVersion = 26.0;
+					};
+				};
+			};
+			buildConfigurationList = 7EF2517A8FE63F4681EC5EEA;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 518DA81DB9B99529C0C0AEBE;
+			productRefGroup = 2F3A6B1E78F896718625FF06;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C7EF1AF98753AB2502399BFB,
+			);
+		};
+		969595A508627F35A110362C = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFS = "";
+				MARKETING_VERSION = 0.1.0;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		4C95F91A6D5CD87BB5DB8FDD = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFS = "";
+				MARKETING_VERSION = 0.1.0;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				COPY_PHASE_STRIP = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				GCC_OPTIMIZATION_LEVEL = s;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		A3FD2624D90AA76C1E18FB70 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = "Sources/HAoLive/Resources/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+								"$(inherited)",
+								"@executable_path/Frameworks",
+							);
+				PRODUCT_BUNDLE_IDENTIFIER = com.haostudio.live;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CB4CAEBFF1A865FD02635BC0 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = "Sources/HAoLive/Resources/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+								"$(inherited)",
+								"@executable_path/Frameworks",
+							);
+				PRODUCT_BUNDLE_IDENTIFIER = com.haostudio.live;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		7EF2517A8FE63F4681EC5EEA = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				969595A508627F35A110362C,
+				4C95F91A6D5CD87BB5DB8FDD,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F2F62AAE534BA46EC59716F3 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A3FD2624D90AA76C1E18FB70,
+				CB4CAEBFF1A865FD02635BC0,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+	};
+	rootObject = 7D179E7F3DBD9906E29C793B;
+}
