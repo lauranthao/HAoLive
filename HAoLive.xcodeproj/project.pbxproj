@@ -19,6 +19,22 @@
 		CD3354AB7EDF6811B6FB5061 = {isa = PBXBuildFile; fileRef = CC4293B3599F4EB73127A528; };
 		E6BBFAAAA57BCBBA269A0627 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayQuality.swift; sourceTree = "<group>"; };
 		D2D4285D5EA1427A36F4FDFD = {isa = PBXBuildFile; fileRef = E6BBFAAAA57BCBBA269A0627; };
+		31336ACE1803952BF0B18931 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
+		96C871BFE4FEF9489620B63E = {isa = PBXBuildFile; fileRef = 31336ACE1803952BF0B18931; };
+		0EB954537E5CA2ADB30642A5 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPClient.swift; sourceTree = "<group>"; };
+		97F8AA3D655A9219E821EC30 = {isa = PBXBuildFile; fileRef = 0EB954537E5CA2ADB30642A5; };
+		8BD30BD881D49EA22520B091 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZlibInflate.swift; sourceTree = "<group>"; };
+		0A2A8B9C0821CBACB658429A = {isa = PBXBuildFile; fileRef = 8BD30BD881D49EA22520B091; };
+		D6B008D8087A6091558721D2 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BinaryCoding.swift; sourceTree = "<group>"; };
+		B88FD05C1825C86C9364A0BE = {isa = PBXBuildFile; fileRef = D6B008D8087A6091558721D2; };
+		8B338B38F14D5805F3B69AAB = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DanmakuSocket.swift; sourceTree = "<group>"; };
+		8EE6A5106F3E33823FE9E388 = {isa = PBXBuildFile; fileRef = 8B338B38F14D5805F3B69AAB; };
+		A19D8A7FDCE95EA2F6C5ECAC = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BilibiliDanmaku.swift; sourceTree = "<group>"; };
+		68078FA728BA312FFF2BB938 = {isa = PBXBuildFile; fileRef = A19D8A7FDCE95EA2F6C5ECAC; };
+		55E282B2F8695446F32CB391 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyuDanmaku.swift; sourceTree = "<group>"; };
+		9D3D032E6D77B1DCF0F5DD1F = {isa = PBXBuildFile; fileRef = 55E282B2F8695446F32CB391; };
+		59E774425EF54494C45A8078 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinDanmaku.swift; sourceTree = "<group>"; };
+		C079D200C65C0C889EC47FD3 = {isa = PBXBuildFile; fileRef = 59E774425EF54494C45A8078; };
 		8B32DECCC6E68C3A67B8D455 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSite.swift; sourceTree = "<group>"; };
 		9FEDB5C389EEF0F11E675D43 = {isa = PBXBuildFile; fileRef = 8B32DECCC6E68C3A67B8D455; };
 		C24E42768343B00ACCACD44D = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomSearchMerger.swift; sourceTree = "<group>"; };
@@ -94,6 +110,30 @@
 			);
 			name = Models;
 			path = Models;
+			sourceTree = "<group>";
+		};
+		58A7C1C28A466D7C1F89767F = {
+			isa = PBXGroup;
+			children = (
+				31336ACE1803952BF0B18931,
+				0EB954537E5CA2ADB30642A5,
+				8BD30BD881D49EA22520B091,
+				D6B008D8087A6091558721D2,
+			);
+			name = Network;
+			path = Network;
+			sourceTree = "<group>";
+		};
+		F4F5984EAD3FF5288F96A936 = {
+			isa = PBXGroup;
+			children = (
+				8B338B38F14D5805F3B69AAB,
+				A19D8A7FDCE95EA2F6C5ECAC,
+				55E282B2F8695446F32CB391,
+				59E774425EF54494C45A8078,
+			);
+			name = Danmaku;
+			path = Danmaku;
 			sourceTree = "<group>";
 		};
 		4263957B4D93EA5617C2FA95 = {
@@ -221,6 +261,8 @@
 			isa = PBXGroup;
 			children = (
 				55E15E5CE1D91BA1D8A39394,
+				58A7C1C28A466D7C1F89767F,
+				F4F5984EAD3FF5288F96A936,
 				4263957B4D93EA5617C2FA95,
 				537D51A7B63624CD653391B4,
 				BF85A818CBD222B5A13A22CF,
@@ -281,6 +323,14 @@
 				E67D3B785D35CE6F0E717DA3,,
 				CD3354AB7EDF6811B6FB5061,,
 				D2D4285D5EA1427A36F4FDFD,,
+				96C871BFE4FEF9489620B63E,,
+				97F8AA3D655A9219E821EC30,,
+				0A2A8B9C0821CBACB658429A,,
+				B88FD05C1825C86C9364A0BE,,
+				8EE6A5106F3E33823FE9E388,,
+				68078FA728BA312FFF2BB938,,
+				9D3D032E6D77B1DCF0F5DD1F,,
+				C079D200C65C0C889EC47FD3,,
 				9FEDB5C389EEF0F11E675D43,,
 				ED7B8B495587FBBF94DCE5B5,,
 				E2354EA357A415FAF810018F,,
@@ -498,6 +548,7 @@
 								"$(inherited)",
 								"@executable_path/Frameworks",
 							);
+				OTHER_LDFLAGS = "-lz";
 				PRODUCT_BUNDLE_IDENTIFIER = com.haostudio.live;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 6.0;
@@ -517,6 +568,7 @@
 								"$(inherited)",
 								"@executable_path/Frameworks",
 							);
+				OTHER_LDFLAGS = "-lz";
 				PRODUCT_BUNDLE_IDENTIFIER = com.haostudio.live;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 6.0;

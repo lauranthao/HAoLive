@@ -19,6 +19,7 @@ struct LiveRoomView: View {
     @State private var danmakuEngine = DanmakuEngine()
     @State private var visibleDanmaku: [DanmakuItem] = []
     @State private var loadError: String?
+    @State private var danmakuTask: Task<Void, Never>?
 
     var body: some View {
         ScrollView {
@@ -49,6 +50,8 @@ struct LiveRoomView: View {
         }
         .task { await enterRoom() }
         .onDisappear {
+            danmakuTask?.cancel()
+            danmakuTask = nil
             playerService.stop()
         }
     }
@@ -197,10 +200,21 @@ struct LiveRoomView: View {
         startDanmakuLoop(site: site)
     }
 
-    /// Feeds sample danmaku lines into the overlay every 1.5s.
-    /// Runs until the view's task is cancelled (room closed).
+    /// Feeds live danmaku into the overlay. Prefers the platform's
+    /// live channel; when the site has none (stubs, or a channel not
+    /// implemented yet) it falls back to cycling sample lines.
+    /// The task is cancelled when the room closes.
     private func startDanmakuLoop(site: any LiveSite) {
-        Task { @MainActor in
+        danmakuTask = Task { @MainActor in
+            var gotLive = false
+            for await item in site.danmakuStream(roomID: room.roomID) {
+                gotLive = true
+                guard settingsStore.danmakuEnabled else { continue }
+                if danmakuEngine.accept(item) {
+                    appendDanmaku(item)
+                }
+            }
+            guard !gotLive else { return }
             let samples = await site.sampleDanmaku(roomID: room.roomID)
             guard !samples.isEmpty else { return }
             var index = 0
@@ -210,13 +224,17 @@ struct LiveRoomView: View {
                 let item = samples[index % samples.count]
                 index += 1
                 if danmakuEngine.accept(item) {
-                    withAnimation(.easeIn(duration: 0.3)) {
-                        visibleDanmaku.append(item)
-                        if visibleDanmaku.count > 8 {
-                            visibleDanmaku.removeFirst(visibleDanmaku.count - 8)
-                        }
-                    }
+                    appendDanmaku(item)
                 }
+            }
+        }
+    }
+
+    private func appendDanmaku(_ item: DanmakuItem) {
+        withAnimation(.easeIn(duration: 0.3)) {
+            visibleDanmaku.append(item)
+            if visibleDanmaku.count > 8 {
+                visibleDanmaku.removeFirst(visibleDanmaku.count - 8)
             }
         }
     }

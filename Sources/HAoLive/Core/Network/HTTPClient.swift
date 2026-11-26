@@ -1,0 +1,88 @@
+// HTTPClient.swift
+// HAo Live — one URLSession wrapper for all platform adapters.
+// Browser-style headers (the platforms' web APIs answer a browser UA;
+// the probes showed several endpoints 403 without one), 15s timeout,
+// and HTTP-status errors surfaced as LiveSiteError so the UI can show
+// a real message instead of a silent empty list.
+
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
+/// Stateless HTTP client. Safe to share across adapters.
+final class HTTPClient: Sendable {
+    static let shared = HTTPClient()
+
+    /// Desktop Chrome UA: the web APIs used by these adapters were
+    /// verified against it from this VM.
+    let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+    let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
+    func get(_ urlString: String, headers: [String: String] = [:], timeout: TimeInterval = 15) async throws -> Data {
+        guard let url = URL(string: urlString) else { throw LiveSiteError.invalidResponse }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = "GET"
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        return try await perform(request)
+    }
+
+    func getJSON(_ urlString: String, headers: [String: String] = [:], timeout: TimeInterval = 15) async throws -> JSONValue {
+        let data = try await get(urlString, headers: headers, timeout: timeout)
+        guard let json = JSONValue.parse(data) else { throw LiveSiteError.invalidResponse }
+        return json
+    }
+
+    /// POST with application/x-www-form-urlencoded body (Douyu's play API).
+    func postForm(_ urlString: String, fields: [String: String], headers: [String: String] = [:], timeout: TimeInterval = 15) async throws -> Data {
+        guard let url = URL(string: urlString) else { throw LiveSiteError.invalidResponse }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = "POST"
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        request.httpBody = fields
+            .map { key, value in
+                let k = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
+                let v = value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value
+                return "\(k)=\(v)"
+            }
+            .joined(separator: "&")
+            .data(using: .utf8)
+        return try await perform(request)
+    }
+
+    func postFormJSON(_ urlString: String, fields: [String: String], headers: [String: String] = [:], timeout: TimeInterval = 15) async throws -> JSONValue {
+        let data = try await postForm(urlString, fields: fields, headers: headers, timeout: timeout)
+        guard let json = JSONValue.parse(data) else { throw LiveSiteError.invalidResponse }
+        return json
+    }
+
+    private func perform(_ request: URLRequest) async throws -> Data {
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw LiveSiteError.networkUnavailable
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw LiveSiteError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw LiveSiteError.httpStatus(http.statusCode)
+        }
+        return data
+    }
+}
