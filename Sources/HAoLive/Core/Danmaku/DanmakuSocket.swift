@@ -60,6 +60,14 @@ final class WebSocketTransport: DanmakuSocket, @unchecked Sendable {
 #if canImport(Network)
 import Network
 
+/// One-shot resume flag for a continuation. The stateUpdateHandler runs on the
+/// connection's serial queue, so the flag is only ever touched from one queue;
+/// the box exists so Swift 6's concurrency checker accepts the capture
+/// (a captured `var` mutated in concurrently-executing code is an error).
+final class ResumedFlag: @unchecked Sendable {
+    var value = false
+}
+
 /// Raw TCP transport backed by NWConnection (Douyu's danmaku server).
 /// `url` is a tcp://host:port URL; headers are ignored.
 final class TCPTransport: DanmakuSocket, @unchecked Sendable {
@@ -77,15 +85,15 @@ final class TCPTransport: DanmakuSocket, @unchecked Sendable {
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
         self.connection = connection
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            var resumed = false
+            let resumed = ResumedFlag()
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    if !resumed { resumed = true; continuation.resume() }
+                    if !resumed.value { resumed.value = true; continuation.resume() }
                 case .failed(let error):
-                    if !resumed { resumed = true; continuation.resume(throwing: error) }
+                    if !resumed.value { resumed.value = true; continuation.resume(throwing: error) }
                 case .cancelled:
-                    if !resumed { resumed = true; continuation.resume(throwing: LiveSiteError.networkUnavailable) }
+                    if !resumed.value { resumed.value = true; continuation.resume(throwing: LiveSiteError.networkUnavailable) }
                 default:
                     break
                 }
