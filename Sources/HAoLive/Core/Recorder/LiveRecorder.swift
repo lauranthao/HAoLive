@@ -154,7 +154,7 @@ final class LiveRecorder: ObservableObject {
         var discontinuity: Bool
     }
 
-    private enum LoopOutcome: Sendable {
+    private enum LoopOutcome: Sendable, Equatable {
         case stoppedByUser
         case streamEnded
         case failed(String)
@@ -220,9 +220,10 @@ final class LiveRecorder: ObservableObject {
 
         while !Task.isCancelled {
             do {
-                let text = try await HTTPClient.shared.get(mediaURL.absoluteString)
+                let data = try await HTTPClient.shared.get(mediaURL.absoluteString)
                 consecutiveFailures = 0
-                guard let playlist = HLSPlaylistParser.parse(text, baseURL: mediaURL) else {
+                guard let text = String(data: data, encoding: .utf8),
+                      let playlist = HLSPlaylistParser.parse(text, baseURL: mediaURL) else {
                     throw LiveSiteError.invalidResponse
                 }
                 switch playlist {
@@ -318,8 +319,9 @@ final class LiveRecorder: ObservableObject {
     /// Returns a failure outcome when it cannot be resolved.
     private nonisolated func resolveVariant(mediaURL: inout URL, params: LoopParams) async -> LoopOutcome? {
         do {
-            let text = try await HTTPClient.shared.get(mediaURL.absoluteString)
-            guard let playlist = HLSPlaylistParser.parse(text, baseURL: mediaURL) else {
+            let data = try await HTTPClient.shared.get(mediaURL.absoluteString)
+            guard let text = String(data: data, encoding: .utf8),
+                  let playlist = HLSPlaylistParser.parse(text, baseURL: mediaURL) else {
                 return .failed("无法解析播放列表")
             }
             if case .master(let variants) = playlist {
