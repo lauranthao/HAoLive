@@ -17,13 +17,30 @@ workflows:
         run_if: '{{getenv "SSH_RSA_PRIVATE_KEY" | ne ""}}'
     - git-clone@8: {}
     - script@1:
+        title: Resolve Swift packages
+        inputs:
+        - content: |-
+            #!/usr/bin/env bash
+            set -e
+            # MPVKit (SPM, ~38 binary targets) must be resolved before
+            # the build: a -target build never generates the package
+            # targets' module maps (primary #17/#18 failed in 30 s
+            # with "GeneratedModuleMaps-iphonesimulator/_FFmpeg.modulemap
+            # not found" + "Unable to find module dependency: 'Libmpv'").
+            xcodebuild -resolvePackageDependencies \
+              -project HAoLive.xcodeproj \
+              -scheme HAoLive
+    - script@1:
         title: Build for simulator (unsigned)
         inputs:
         - content: |-
             #!/usr/bin/env bash
             set -e
+            # Build by -scheme (not -target): -target never builds the
+            # SPM package targets first, so their generated module maps
+            # are missing and the Clang scan fails for every module.
             xcodebuild -project HAoLive.xcodeproj \
-              -target HAoLive \
+              -scheme HAoLive \
               -configuration Debug \
               -sdk iphonesimulator \
               -destination 'generic/platform=iOS Simulator' \
@@ -37,6 +54,16 @@ workflows:
     - activate-ssh-key@4:
         run_if: '{{getenv "SSH_RSA_PRIVATE_KEY" | ne ""}}'
     - git-clone@8: {}
+    - script@1:
+        title: Resolve Swift packages
+        inputs:
+        - content: |-
+            #!/usr/bin/env bash
+            set -e
+            # Same reason as primary: resolve MPVKit before building.
+            xcodebuild -resolvePackageDependencies \
+              -project HAoLive.xcodeproj \
+              -scheme HAoLive
     - script@1:
         title: Build unsigned app (device, Release)
         inputs:
