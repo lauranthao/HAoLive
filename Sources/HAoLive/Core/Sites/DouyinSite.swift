@@ -81,8 +81,11 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
     /// settings cookie field) is out of scope here — HAo Live has no
     /// Douyin login, and the anonymous cookie is what the web client
     /// uses for these endpoints.
-    private static var anonymousCookie = ""
-    private static var anonymousCookieTask: Task<String, Never>?
+    /// Single-flight lazy cache: two concurrent callers may both
+    /// fetch once, both writing the same value — benign. Same
+    /// nonisolated(unsafe) shape as HuyaSite's static UID caches.
+    private nonisolated(unsafe) static var anonymousCookie = ""
+    private nonisolated(unsafe) static var anonymousCookieTask: Task<String, Never>?
 
     /// Headers for Douyin API calls: base headers + anonymous cookie
     /// when one has been fetched. An empty cookie still returns the
