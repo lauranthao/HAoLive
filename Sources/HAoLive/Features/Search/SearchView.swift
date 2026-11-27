@@ -297,11 +297,16 @@ struct SearchView: View {
         }
         let targetPage = reset ? 1 : page + 1
         let sites = sites()
+        // Read `kind` here, on the main actor: the task-group children
+        // below are @Sendable and cannot touch the @MainActor @State.
+        // (primary #26: "main actor-isolated property 'kind' cannot
+        // be accessed from outside of the actor".)
+        let searchKind = kind
         let perPlatform = await withTaskGroup(of: (Int, [LiveRoom]?).self) { group in
             for (index, site) in sites.enumerated() {
                 group.addTask {
                     let list: [LiveRoom]?
-                    switch kind {
+                    switch searchKind {
                     case .rooms:
                         list = try? await site.searchRooms(keyword: trimmed, page: targetPage)
                     case .anchors:
