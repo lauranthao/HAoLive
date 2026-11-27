@@ -157,7 +157,9 @@ final class BilibiliSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Play URLs
 
-    func playURLs(roomID: String) async throws -> [PlayStream] {
+    func playURLs(room: LiveRoom) async throws -> [PlayStream] {
+        let roomID = room.roomID
+        let headers = PlaybackHeaders.headers(platform: .bilibili, roomID: roomID)
         let url = "\(Self.apiBase)/xlive/web-room/v2/index/getRoomPlayInfo?room_id=\(roomID)&protocol=0,1&format=0,1,2&codec=0,1&qn=10000&platform=web&ptype=8"
         let json = try await http.getJSON(url)
         guard json["code"].intValue == 0 else { throw LiveSiteError.invalidResponse }
@@ -166,15 +168,19 @@ final class BilibiliSite: LiveSite, @unchecked Sendable {
         // loop a recorded video instead of a live stream. Pure Live
         // resolves the video through getRoundPlayVideo + x/player/playurl.
         if data["playurl_info"].isNull, data["live_status"].intValue == 2 {
-            return try await carouselStreams(roomID: roomID)
+            return try await carouselStreams(roomID: roomID, headers: headers)
         }
         let playurl = data["playurl_info"]["playurl"]
         guard !playurl.isNull else { return [] } // room offline
-        return Self.streams(fromPlayInfo: playurl)
+        return Self.streams(fromPlayInfo: playurl).map { stream in
+            var stream = stream
+            stream.headers = headers
+            return stream
+        }
     }
 
     /// The video a carousel room is looping, as playable streams.
-    private func carouselStreams(roomID: String) async throws -> [PlayStream] {
+    private func carouselStreams(roomID: String, headers: [String: String]) async throws -> [PlayStream] {
         let round = try await http.getJSON("\(Self.apiBase)/live/getRoundPlayVideo?room_id=\(roomID)")
         guard let video = Self.roundVideo(fromJSON: round) else { return [] }
         let play = try await http.getJSON(
@@ -182,7 +188,7 @@ final class BilibiliSite: LiveSite, @unchecked Sendable {
             headers: ["Referer": "https://www.bilibili.com/"]
         )
         return Self.videoURLs(fromJSON: play).map {
-            PlayStream(url: $0, quality: "轮播", line: "主线路")
+            PlayStream(url: $0, quality: "轮播", line: "主线路", headers: headers)
         }
     }
 

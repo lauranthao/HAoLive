@@ -128,6 +128,50 @@ enum JSONValue: Sendable {
         return []
     }
 
+    /// Re-encode this value as compact JSON text (for carrying a
+    /// platform payload on LiveRoom.playDataJSON). Numbers re-encode
+    /// as JSON numbers; keys keep their names.
+    /// Re-encode this value as compact JSON text. Nil when there is
+    /// nothing to carry (.null). NOTE: JSONSerialization only accepts
+    /// a top-level Array/Dictionary — calling it on a scalar raises
+    /// an NSException that try? CANNOT catch and crashes the app
+    /// (Swift 6.2: "Invalid top-level type in JSON write"), so
+    /// scalars are encoded without it.
+    var jsonString: String? {
+        switch self {
+        case .null: return nil
+        case .string(let s):
+            guard let data = try? JSONEncoder().encode(s) else { return nil }
+            return String(data: data, encoding: .utf8)
+        case .bool(let b): return b ? "true" : "false"
+        case .number(let n):
+            if n.truncatingRemainder(dividingBy: 1) == 0, abs(n) < 9_007_199_254_740_992 {
+                return String(Int(n))
+            }
+            return String(n)
+        case .array, .object:
+            guard let data = try? JSONSerialization.data(withJSONObject: rawObject, options: []) else { return nil }
+            return String(data: data, encoding: .utf8)
+        }
+    }
+
+    /// The Foundation object behind this value, for re-encoding.
+    var rawObject: Any {
+        switch self {
+        case .null: return NSNull()
+        case .bool(let b): return b
+        case .number(let n):
+            // Whole numbers re-encode without a decimal point.
+            if n.truncatingRemainder(dividingBy: 1) == 0, abs(n) < 9_007_199_254_740_992 {
+                return Int(n)
+            }
+            return n
+        case .string(let s): return s
+        case .array(let items): return items.map { $0.rawObject }
+        case .object(let dict): return dict.mapValues { $0.rawObject }
+        }
+    }
+
     var objectValue: [String: JSONValue] {
         if case .object(let dict) = self { return dict }
         return [:]

@@ -18,6 +18,13 @@ struct LiveRoom: Identifiable, Hashable, Codable, Sendable {
     var viewerCount: Int
     var isLive: Bool
 
+    /// Platform payload carried from the list item that produced
+    /// this room, as compact JSON text (Pure Live's LiveRoom.data).
+    /// Kuaishou stores its playUrls descriptors here: playback
+    /// uses them directly instead of re-fetching the (rate-limited)
+    /// room page. Nil when the platform has no list payload.
+    var playDataJSON: String? = nil
+
     /// Stable identity across platforms for dedupe in merged search:
     /// same anchor + same title on two platforms is treated as one room.
     var dedupeKey: String {

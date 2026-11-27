@@ -7,11 +7,28 @@
 import Foundation
 
 /// One playable stream: a quality on a line.
+/// `headers` are the HTTP headers the player must send when opening
+/// this stream (Pure Live's PlaybackHeaderResolver: per-platform
+/// User-Agent / Origin / Referer / Cookie). AVPlayer cannot send
+/// them; libmpv can (http-header-fields). Streams without headers
+/// play with the engine default.
 struct PlayStream: Identifiable, Hashable, Codable, Sendable {
     var id: String { "\(quality)|\(line)|\(url.absoluteString)" }
     var url: URL
     var quality: String
     var line: String
+    var headers: [String: String] = [:]
+
+    /// Container declared by the URL ("flv" / "hls" / ""), so the
+    /// engine does not have to probe for it (Pure Live's
+    /// LiveStreamFacts.format, carried in the source metadata).
+    var format: String {
+        let path = url.path.lowercased()
+        if path.hasSuffix(".flv") { return "flv" }
+        if path.hasSuffix(".m3u8") { return "hls" }
+        if url.scheme?.lowercased() == "rtmp" { return "flv" }
+        return ""
+    }
 
     /// FLV / RTMP streams need an FLV-capable engine (mpv / VLC).
     /// AVPlayer cannot play them — the player reports this honestly

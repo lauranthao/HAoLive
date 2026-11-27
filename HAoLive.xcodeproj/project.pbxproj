@@ -63,6 +63,12 @@
 		5BA1E4CE48362180AF08F9FD = {isa = PBXBuildFile; fileRef = 259CC766ABE622587BC59278; };
 		89ED69F9FF508AE7EE769E5C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePlayerService.swift; sourceTree = "<group>"; };
 		2D7FBD39E2A07F5B76FB3C7A = {isa = PBXBuildFile; fileRef = 89ED69F9FF508AE7EE769E5C; };
+		923AC28900A176DC67F65310 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackHeaders.swift; sourceTree = "<group>"; };
+		9F899E947CD387F2CD3F7E97 = {isa = PBXBuildFile; fileRef = 923AC28900A176DC67F65310; };
+		6AF9ABBB69A4BFD1C552DF33 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerEngine.swift; sourceTree = "<group>"; };
+		3854E8BFEBA93E709E536B0E = {isa = PBXBuildFile; fileRef = 6AF9ABBB69A4BFD1C552DF33; };
+		6C6B0C0A2223BDD66A1010CB = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MpvPlayerEngine.swift; sourceTree = "<group>"; };
+		4120B705C126BA10B993CEF4 = {isa = PBXBuildFile; fileRef = 6C6B0C0A2223BDD66A1010CB; };
 		87C27D7D6E8F23741D6DD38A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesStore.swift; sourceTree = "<group>"; };
 		C72003B663B760C3E09BD7C5 = {isa = PBXBuildFile; fileRef = 87C27D7D6E8F23741D6DD38A; };
 		8BA8B8CD320A38089CEF53C9 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
@@ -167,6 +173,9 @@
 			children = (
 				259CC766ABE622587BC59278,
 				89ED69F9FF508AE7EE769E5C,
+				923AC28900A176DC67F65310,
+				6AF9ABBB69A4BFD1C552DF33,
+				6C6B0C0A2223BDD66A1010CB,
 			);
 			name = Player;
 			path = Player;
@@ -354,6 +363,9 @@
 				2B654FC587947F691FABB5D2,
 				5BA1E4CE48362180AF08F9FD,
 				2D7FBD39E2A07F5B76FB3C7A,
+				9F899E947CD387F2CD3F7E97,
+				3854E8BFEBA93E709E536B0E,
+				4120B705C126BA10B993CEF4,
 				C72003B663B760C3E09BD7C5,
 				109763D21E817FE8E588F0D1,
 				80E96D5C9B612A450F3A94F4,
@@ -375,6 +387,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				539F308680A2A50D769FD307,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -399,9 +412,29 @@
 			dependencies = (
 			);
 			name = HAoLive;
+			packageProductDependencies = (
+				A9AD5C1FFED5C713909CCC7F,
+			);
 			productName = HAoLive;
 			productReference = ABFCD27E129B273B9A8FE19D;
 			productType = "com.apple.product-type.application";
+		};
+		16410373B0F18FCC7665C609 = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/mpvkit/MPVKit";
+			requirement = {
+				kind = exactVersion;
+				version = 1.1.0-n9.0.2;
+			};
+		};
+		A9AD5C1FFED5C713909CCC7F = {
+			isa = XCSwiftPackageProductDependency;
+			package = 16410373B0F18FCC7665C609;
+			productName = MPVKit;
+		};
+		539F308680A2A50D769FD307 = {
+			isa = PBXBuildFile;
+			productRef = A9AD5C1FFED5C713909CCC7F;
 		};
 		7D179E7F3DBD9906E29C793B = {
 			isa = PBXProject;
@@ -423,6 +456,9 @@
 				Base,
 			);
 			mainGroup = 518DA81DB9B99529C0C0AEBE;
+			packageReferences = (
+				16410373B0F18FCC7665C609,
+			);
 			productRefGroup = 2F3A6B1E78F896718625FF06;
 			projectDirPath = "";
 			projectRoot = "";

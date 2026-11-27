@@ -76,7 +76,7 @@ class StubLiveSite: LiveSite, @unchecked Sendable {
         return room
     }
 
-    func playURLs(roomID: String) async throws -> [PlayStream] {
+    func playURLs(room: LiveRoom) async throws -> [PlayStream] {
         // STUB streams: not playable URLs. The player shows the
         // quality + line UI against them; real URLs come with the
         // real adapter. Never present a stub URL as playable.

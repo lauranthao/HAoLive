@@ -19,15 +19,15 @@
 //                   gameStreamInfoList: [{sCdnType, sStreamName,
 //                     sHlsUrl, sHlsUrlSuffix, sHlsAntiCode}]}],
 //                   vMultiStreamInfo: [{sDisplayName, iBitRate}]}
-//   play URL: HLS = sHlsUrl + "/" + sStreamName + "." + sHlsUrlSuffix
-//             + "?" + sHlsAntiCode (scheme upgraded to https for ATS).
-//             The m3u8 is a master playlist (the anti-code's fm field
-//             lists bitrate variants $0..$3), so AVPlayer adapts
-//             quality itself: the offered quality is "自适应" and the
-//             picker switches CDN lines.
-//   HLS playback itself is NOT verifiable from this VM: the CDN
-//   answers 403 to this egress IP (the anti-code is IP-bound).
-//   Needs a China-network device to confirm playback.
+//   play URL: per CDN entry one FLV line (sFlvUrl) and one HLS
+//             line (sHlsUrl); each URL is RE-SIGNED with
+//             buildAntiCode (viewer UID from anonymousLogin, fm
+//             template decoded, wsSecret recomputed, seqid/u added)
+//             — Pure Live's getPlayUrl, ported. The raw page
+//             template (build 5) is not a playable URL.
+//             Qualities from vMultiStreamInfo (iBitRate);
+//             ratio replaced per quality, codec=264 forced.
+//             Playback headers: HYSDK UA + Origin/Referer.
 // Danmaku: live TAF/JCE WebSocket channel (wss://cdnws.api.huya.com).
 // Room ids come from m.huya.com/{room} (lYyid, lChannelId,
 // lSubChannelId); register with WSUserInfo in a WebSocketCommand,
@@ -140,45 +140,332 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
         )
     }
 
-    // MARK: - Play URLs
+    // MARK: - Play URLs (Pure Live's Huya route, ported)
+    //
+    // Per room page (hyPlayerConfig.stream):
+    //   - each gameStreamInfoList entry yields TWO lines: FLV
+    //     (sFlvUrl) and HLS (sHlsUrl), sharing sFlvAntiCode /
+    //     sHlsAntiCode, sStreamName, sCdnType; presenterUid is the
+    //     first entry's lChannelId.
+    //   - qualities come from vMultiStreamInfo (sDisplayName,
+    //     iBitRate; HDR skipped); bitRate 0 is source quality.
+    //   - every URL is RE-SIGNED with buildAntiCode (Pure Live):
+    //     the page template's fm is signing material, not a media
+    //     query field — it is decoded, its $0..$3 placeholders are
+    //     filled with the viewer UID / stream / signature hash /
+    //     wsTime, and the emitted URL carries the recomputed
+    //     wsSecret + seqid + u (no fm). Sending the raw template
+    //     (what build 5 did) leaves the page's wsSecret in place
+    //     with no seqid/u — the CDN rejects it.
+    //   - FLV lines prefer Pure Live's native WUP token
+    //     (getNativeCdnTokenInfoEx, TARS/TUP); that call is NOT
+    //     ported in this leg — FLV uses the web-template fallback
+    //     (buildAntiCode on sFlvAntiCode), which Pure Live keeps
+    //     for exactly this case.
+    //   - ratio is replaced per quality (removed for source);
+    //     codec=264 is forced when the anti-code omits it.
 
-    func playURLs(roomID: String) async throws -> [PlayStream] {
+    func playURLs(room: LiveRoom) async throws -> [PlayStream] {
+        let roomID = room.roomID
         let html = try await roomPage(roomID: roomID)
         guard let stream = Self.extractStreamObject(in: html) else { return [] }
-        return Self.streams(fromStreamObject: stream)
+        let viewerUID = await Self.viewerUID()
+        let headers = PlaybackHeaders.headers(platform: .huya, roomID: roomID)
+        return Self.streams(fromStreamObject: stream, viewerUID: viewerUID, headers: headers)
     }
 
-    /// Pure parser for the hyPlayerConfig.stream object: one HLS
-    /// stream per CDN line (scheme upgraded to https for ATS).
-    /// Testable without the network.
-    static func streams(fromStreamObject stream: JSONValue) -> [PlayStream] {
+    /// Pure builder for the hyPlayerConfig.stream object: all
+    /// qualities × all lines, best first (source, then bitrate
+    /// descending; FLV line before HLS line per CDN entry — Pure
+    /// Live's line order). Testable without the network.
+    static func streams(fromStreamObject stream: JSONValue, viewerUID: Int, headers: [String: String]) -> [PlayStream] {
         let first = stream["data"][0]
         guard !first.isNull else { return [] }
-        var streams: [PlayStream] = []
-        for entry in first["gameStreamInfoList"].arrayValue {
-            guard let hlsBase = entry["sHlsUrl"].stringValue,
-                  let streamName = entry["sStreamName"].stringValue,
-                  let suffix = entry["sHlsUrlSuffix"].stringValue,
-                  let antiCode = entry["sHlsAntiCode"].stringValue,
-                  !hlsBase.isEmpty, !streamName.isEmpty else { continue }
-            var urlString = "\(hlsBase)/\(streamName).\(suffix)?\(antiCode)"
-            if urlString.hasPrefix("http://") {
-                urlString = "https://" + urlString.dropFirst("http://".count)
-            }
-            // Pure Live: the anti-code sometimes omits the codec; the
-            // CDN then serves a codec the player cannot use. Force AVC.
-            if !urlString.contains("codec=") {
-                urlString += "&codec=264"
-            }
-            guard let url = URL(string: urlString) else { continue }
+        var lines: [HuyaLine] = []
+        var presenterUID = 0
+        let entries = first["gameStreamInfoList"].arrayValue
+        if let firstEntry = entries.first {
+            presenterUID = firstEntry["lChannelId"].intValue ?? 0
+        }
+        for entry in entries {
+            guard let streamName = entry["sStreamName"].stringValue, !streamName.isEmpty else { continue }
             let cdn = entry["sCdnType"].stringValue ?? ""
-            streams.append(PlayStream(
-                url: url,
-                quality: "自适应",
-                line: Self.cdnNames[cdn] ?? (cdn.isEmpty ? "主线路" : cdn)
-            ))
+            let flvAnti = entry["sFlvAntiCode"].stringValue ?? ""
+            let hlsAnti = entry["sHlsAntiCode"].stringValue ?? ""
+            if let flvBase = entry["sFlvUrl"].stringValue, !flvBase.isEmpty {
+                lines.append(HuyaLine(base: flvBase, cdnType: cdn, streamName: streamName, flvAntiCode: flvAnti, hlsAntiCode: hlsAnti, lineType: .flv, presenterUID: presenterUID))
+            }
+            if let hlsBase = entry["sHlsUrl"].stringValue, !hlsBase.isEmpty {
+                lines.append(HuyaLine(base: hlsBase, cdnType: cdn, streamName: streamName, flvAntiCode: flvAnti, hlsAntiCode: hlsAnti, lineType: .hls, presenterUID: presenterUID))
+            }
+        }
+        guard !lines.isEmpty else { return [] }
+        // Qualities: vMultiStreamInfo, HDR skipped; source (0) first.
+        var rates: [(name: String, bitRate: Int)] = []
+        for item in stream["vMultiStreamInfo"].arrayValue {
+            guard let name = item["sDisplayName"].stringValue, !name.isEmpty,
+                  !name.contains("HDR"),
+                  let rate = item["iBitRate"].intValue else { continue }
+            if !rates.contains(where: { $0.bitRate == rate }) {
+                rates.append((name: name, bitRate: rate))
+            }
+        }
+        if !rates.contains(where: { $0.bitRate == 0 }) {
+            rates.insert((name: "原画", bitRate: 0), at: 0)
+        }
+        rates.sort { a, b in
+            if (a.bitRate == 0) != (b.bitRate == 0) { return a.bitRate == 0 }
+            return a.bitRate > b.bitRate
+        }
+        var streams: [PlayStream] = []
+        for rate in rates {
+            for line in lines {
+                guard let urlString = Self.playURL(line: line, bitRate: rate.bitRate, viewerUID: viewerUID),
+                      let url = URL(string: urlString) else { continue }
+                streams.append(PlayStream(
+                    url: url,
+                    quality: rate.name,
+                    line: Self.cdnNames[line.cdnType] ?? (line.cdnType.isEmpty ? "主线路" : line.cdnType),
+                    headers: headers
+                ))
+            }
         }
         return streams
+    }
+
+    /// One CDN line (Pure Live's HuyaLineModel, without the WUP lease).
+    struct HuyaLine {
+        enum Kind { case flv, hls }
+        var base: String
+        var cdnType: String
+        var streamName: String
+        var flvAntiCode: String
+        var hlsAntiCode: String
+        var lineType: Kind
+        var presenterUID: Int
+    }
+
+    /// Pure Live's getPlayUrl (web-template path): pick the
+    /// transport's anti-code, re-sign it with the viewer UID, force
+    /// codec=264, replace ratio. Returns nil when no signing
+    /// material is available. Testable without the network.
+    static func playURL(line: HuyaLine, bitRate: Int, viewerUID: Int) -> String? {
+        var antiCode = line.lineType == .flv ? line.flvAntiCode.trimmingCharacters(in: .whitespaces) : line.hlsAntiCode.trimmingCharacters(in: .whitespaces)
+        guard !antiCode.isEmpty else { return nil }
+        // Web-template fallback: a template without fm is a legacy
+        // static token, used as-is; one with fm must be re-signed.
+        if antiCode.contains("fm=") {
+            guard let signed = try? buildAntiCode(stream: line.streamName, viewerUID: viewerUID, antiCode: antiCode) else { return nil }
+            antiCode = signed
+        }
+        let ext = line.lineType == .hls ? "m3u8" : "flv"
+        let cdnBase = Self.secureHuyaCdnBase(line.base)
+        if !Self.queryHasKey(antiCode, key: "codec") { antiCode += "&codec=264" }
+        antiCode = Self.replaceQueryParameter(antiCode, key: "ratio", value: bitRate > 0 ? String(bitRate) : nil)
+        return "\(cdnBase)/\(line.streamName).\(ext)?\(antiCode)"
+    }
+
+    /// http -> https, only for Huya hosts (Pure Live's
+    /// secureHuyaCdnBase).
+    static func secureHuyaCdnBase(_ base: String) -> String {
+        guard let url = URL(string: base),
+              url.scheme == "http",
+              url.host == "huya.com" || (url.host?.hasSuffix(".huya.com") == true),
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return base }
+        components.scheme = "https"
+        return components.string ?? base
+    }
+
+    static func queryHasKey(_ query: String, key: String) -> Bool {
+        query.split(separator: "&").contains { segment in
+            segment.split(separator: "=", maxSplits: 1).first.map(String.init) == key
+        }
+    }
+
+    /// Replace (or remove) one query parameter, preserving order
+    /// (Pure Live's replaceQueryParameter).
+    static func replaceQueryParameter(_ query: String, key: String, value: String?) -> String {
+        var output: [String] = []
+        var replaced = false
+        for segment in query.split(separator: "&", omittingEmptySubsequences: true) {
+            let segmentKey = segment.split(separator: "=", maxSplits: 1).first.map(String.init) ?? String(segment)
+            if segmentKey != key {
+                output.append(String(segment))
+                continue
+            }
+            if !replaced, let value {
+                output.append("\(key)=\(value)")
+            }
+            replaced = true
+        }
+        if !replaced, let value {
+            output.append("\(key)=\(value)")
+        }
+        return output.joined(separator: "&")
+    }
+
+    /// Anonymous viewer UID from Huya's anonymousLogin endpoint
+    /// (no login). Cached for the process; on failure a stable
+    /// process-local fallback UID is used (Pure Live's
+    /// _loadAnonymousViewerIdentity / _createFallbackViewerUid).
+    private static var cachedViewerUID: Int?
+    private static var fallbackViewerUID: Int?
+
+    static func viewerUID() async -> Int {
+        if let cached = cachedViewerUID { return cached }
+        if let uid = try? await anonymousLoginUID(), uid > 0 {
+            cachedViewerUID = uid
+            return uid
+        }
+        if let fallback = fallbackViewerUID { return fallback }
+        let fallback = 1_400_000_000_000 + Int.random(in: 0..<1_000_000) * 100_000 + Int.random(in: 0..<100_000)
+        fallbackViewerUID = fallback
+        return fallback
+    }
+
+    private static func anonymousLoginUID() async throws -> Int {
+        let fields: [String: Any] = ["appId": 5002, "byPass": 3, "context": "", "version": "2.4", "data": [:] as [String: Any]]
+        let body = try JSONSerialization.data(withJSONObject: fields, options: [])
+        var request = URLRequest(url: URL(string: "https://udblgn.huya.com/web/anonymousLogin")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(HTTPClient.shared.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue("https://www.huya.com", forHTTPHeaderField: "Origin")
+        request.setValue("https://www.huya.com/", forHTTPHeaderField: "Referer")
+        request.httpBody = body
+        let (data, _) = try await URLSession.shared.data(for: request)
+        guard let json = JSONValue.parse(data),
+              let uid = json["data"]["uid"].intValue, uid > 0 else {
+            throw LiveSiteError.invalidResponse
+        }
+        return uid
+    }
+
+    /// Pure Live's buildAntiCode: re-sign a page anti-code template
+    /// with the viewer UID and the server-issued expiry. The fm
+    /// field is a base64 template with $0..$3 placeholders —
+    /// $0 = rotated UID, $1 = stream name, $2 = MD5(seqid|ctype|t),
+    /// $3 = wsTime — whose MD5 becomes the new wsSecret. The
+    /// emitted URL drops fm and carries seqid / u / ctype / ver /
+    /// fs / t. Throws when the template is incomplete or expired.
+    /// Testable without the network (pass `now`).
+    static func buildAntiCode(stream: String, viewerUID: Int, antiCode: String, now: Date = Date()) throws -> String {
+        let (originalKeys, original) = Self.parseQuery(antiCode)
+        guard let encodedFm = original["fm"], !encodedFm.isEmpty else { return antiCode }
+        let ctype = original["ctype"].flatMap { $0.isEmpty ? nil : $0 } ?? "huya_webh5"
+        let platformId = original["t"].flatMap { $0.isEmpty ? nil : $0 } ?? "100"
+        let isWap = platformId == "103"
+        let currentMillis = Int(now.timeIntervalSince1970 * 1000)
+        let currentSeconds = currentMillis / 1000
+        let uid = viewerUID > 0 ? viewerUID : (fallbackViewerUID ?? 1_400_000_000_000)
+        guard let wsTimeRaw = original["wsTime"],
+              let wsTimeSeconds = Int(wsTimeRaw, radix: 16) else {
+            throw LiveSiteError.invalidResponse
+        }
+        guard currentSeconds <= wsTimeSeconds + 300 else {
+            throw LiveSiteError.invalidResponse // lease expired
+        }
+        let wsTime = wsTimeRaw.lowercased()
+        let seqId = uid + currentMillis
+        let secretHash = MD5.hex("\(seqId)|\(ctype)|\(platformId)")
+        let convertUid = Self.rotateViewerUid32(uid)
+        let calcUid = isWap ? uid : convertUid
+        guard let fmData = Data(base64Encoded: Self.paddedBase64(encodedFm)),
+              let secretTemplate = String(data: fmData, encoding: .utf8),
+              ["$0", "$1", "$2", "$3"].allSatisfy({ secretTemplate.contains($0) }) else {
+            throw LiveSiteError.invalidResponse
+        }
+        let secretStr = secretTemplate
+            .replacingOccurrences(of: "$0", with: String(calcUid))
+            .replacingOccurrences(of: "$1", with: stream)
+            .replacingOccurrences(of: "$2", with: secretHash)
+            .replacingOccurrences(of: "$3", with: wsTime)
+        let wsSecret = MD5.hex(secretStr)
+        let ct = Int((Double(wsTimeSeconds) + Double.random(in: 0..<1)) * 1000)
+        let uuid = Int((((Double(ct % 10_000_000_000) + Double.random(in: 0..<1)) * 1_000).truncatingRemainder(dividingBy: 4_294_967_295)))
+        var params = original
+        params.removeValue(forKey: "wsSecret")
+        params.removeValue(forKey: "seqid")
+        params.removeValue(forKey: "u")
+        params.removeValue(forKey: "uid")
+        params.removeValue(forKey: "uuid")
+        params.removeValue(forKey: "fm")
+        params["wsSecret"] = wsSecret
+        params["wsTime"] = wsTime
+        params["seqid"] = String(seqId)
+        params["ctype"] = ctype
+        params["ver"] = "1"
+        params["fs"] = original["fs"] ?? "bgct"
+        params["t"] = platformId
+        if isWap {
+            params["uid"] = String(uid)
+            params["uuid"] = String(uuid)
+        } else {
+            params["u"] = String(convertUid)
+        }
+        return Self.queryString(from: params, orderedKeys: Self.orderedAntiCodeKeys(originalKeys: originalKeys))
+    }
+
+    /// Huya's web player rotates only the low 32-bit lane of the
+    /// 64-bit viewer UID (rotl by 8); the upper lane is preserved.
+    /// (Pure Live's rotateViewerUid32 — "rotl64" in the web player.)
+    static func rotateViewerUid32(_ value: Int) -> Int {
+        let low = value & 0xFFFF_FFFF
+        let high = value - low
+        let rotatedLow = ((low << 8) | (low >> 24)) & 0xFFFF_FFFF
+        return high | rotatedLow
+    }
+
+    /// Parse a query string, keeping the key order (Dart's
+    /// Uri.queryParameters is insertion-ordered; Swift's
+    /// Dictionary is not, so the order rides alongside).
+    static func parseQuery(_ query: String) -> (keys: [String], params: [String: String]) {
+        var keys: [String] = []
+        var params: [String: String] = [:]
+        for segment in query.split(separator: "&", omittingEmptySubsequences: true) {
+            let parts = segment.split(separator: "=", maxSplits: 1)
+            guard let key = parts.first.map(String.init) else { continue }
+            let value = parts.count > 1 ? String(parts[1]) : ""
+            if params[key] == nil { keys.append(key) }
+            params[key] = value.removingPercentEncoding ?? value
+        }
+        return (keys, params)
+    }
+
+    static func queryParameters(of query: String) -> [String: String] {
+        Self.parseQuery(query).params
+    }
+
+    /// Rebuild a query string keeping the original key order first,
+    /// then any new keys (wsSecret/seqid/... keep a stable order).
+    static func queryString(from params: [String: String], orderedKeys: [String]) -> String {
+        var seen = Set<String>()
+        var parts: [String] = []
+        for key in orderedKeys where params[key] != nil {
+            seen.insert(key)
+            parts.append("\(key)=\(params[key]!)")
+        }
+        for key in params.keys.sorted() where !seen.contains(key) {
+            parts.append("\(key)=\(params[key]!)")
+        }
+        return parts.joined(separator: "&")
+    }
+
+    static func orderedAntiCodeKeys(originalKeys: [String]) -> [String] {
+        // Keep the page's own key order for keys that survive; the
+        // signed keys are appended in Pure Live's insertion order.
+        var keys = originalKeys
+        for key in ["wsSecret", "wsTime", "seqid", "ctype", "ver", "fs", "t", "u", "uid", "uuid"] where !keys.contains(key) {
+            keys.append(key)
+        }
+        return keys
+    }
+
+    static func paddedBase64(_ string: String) -> String {
+        var s = string
+        while s.count % 4 != 0 { s += "=" }
+        return s
     }
 
     // MARK: - Danmaku

@@ -29,8 +29,11 @@ protocol LiveSite: AnyObject, Sendable {
     /// Full detail for one room.
     func roomDetail(roomID: String) async throws -> LiveRoom
 
-    /// Playable streams for one room (quality + line).
-    func playURLs(roomID: String) async throws -> [PlayStream]
+    /// Playable streams for one room (quality + line). The room
+    /// carries its list payload (LiveRoom.playDataJSON) when the
+    /// platform ships play URLs with the list item — Pure Live's
+    /// getPlayUrls(liveroom:) reads it instead of re-fetching.
+    func playURLs(room: LiveRoom) async throws -> [PlayStream]
 
     /// Sample danmaku lines for the room (stub data in this skeleton;
     /// the real adapter will open the platform's danmaku channel).

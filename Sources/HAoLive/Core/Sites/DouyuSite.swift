@@ -133,7 +133,8 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Play URLs (signed getH5PlayV1)
 
-    func playURLs(roomID: String) async throws -> [PlayStream] {
+    func playURLs(room: LiveRoom) async throws -> [PlayStream] {
+        let roomID = room.roomID
         let did = Self.deviceID()
         guard let enc = try? await encryption(did: did) else { return [] }
         // The first call also lists the CDN codes for the line matrix.
@@ -167,7 +168,14 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
         }
         // Best quality first (原画, 超清, 高清, 流畅).
         let order = Self.rateQualities.map(\.quality)
-        return streams.sorted { order.firstIndex(of: $0.quality) ?? 99 < order.firstIndex(of: $1.quality) ?? 99 }
+        let headers = PlaybackHeaders.headers(platform: .douyu, roomID: roomID, cookie: "dy_did=\(did); acf_did=\(did)")
+        return streams
+            .sorted { order.firstIndex(of: $0.quality) ?? 99 < order.firstIndex(of: $1.quality) ?? 99 }
+            .map { stream in
+                var stream = stream
+                stream.headers = headers
+                return stream
+            }
     }
 
     /// The device id the signing binds to. One stable random id,

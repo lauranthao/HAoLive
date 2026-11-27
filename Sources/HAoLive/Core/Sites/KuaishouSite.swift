@@ -11,20 +11,21 @@
 //   playUrls descriptors: {h264: {adaptationSet: {representation:
 //             [{url, level, bitrate, name, shortName, qualityType}]}}}
 //             or {hevc: ...} or a direct adaptationSet descriptor.
-//             The API lists FLV URLs only (139/139 in the live probe).
-//             Kuaishou's CDN serves the same signed stream as HLS at
-//             the same path with a .m3u8 suffix — verified live: the
-//             swapped URL returns a valid #EXTM3U master playlist, so
-//             AVPlayer can play it. The adapter derives the HLS URL
-//             from every FLV URL instead of dropping it.
+//             The API lists FLV URLs only (h264+aac, ffprobe-verified
+//             2026-11-27); they are used verbatim — mpv plays FLV
+//             natively. The old .flv→.m3u8 derivation was WRONG: the
+//             swapped URL returns HTTP 200 with FLV bytes, not a
+//             playlist (verified live 2026-11-27).
 //   room page GET https://live.kuaishou.com/u/{userId} — the page
 //             embeds window.__INITIAL_STATE__ (plain JSON) with:
 //               liveroom: {websocketUrls: [], token: "", playList: [{
 //                 liveStream: {...}, author: {...}, gameInfo: {...},
 //                 isLiving: Bool, errorType: {type, title, content, url}}]}
 //             Still rate-limited from this VM ("请求过快，请稍后重试"),
-//             so the room-page path is defensive; the list APIs above
-//             are the verified source of rooms and streams.
+//             and a live room's own page carries an EMPTY liveStream
+//             (verified 2026-11-27), so the room-page path is only a
+//             fallback; the list payload (LiveRoom.playDataJSON) is
+//             the verified source of streams.
 // Danmaku: live WebSocket feed (KuaiShouPack protobuf). Room info
 // comes from m.gifshow.com/fw/live/{userId} (wsFeedInfo:
 // liveStreamId, websocketUrls[0], token); enter with CS_ENTER_ROOM,
@@ -104,25 +105,47 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
         return Self.room(fromEntry: entry, userID: roomID)
     }
 
-    // MARK: - Play URLs
+    // MARK: - Play URLs (Pure Live's Kuaishou route, ported)
+    //
+    // The play URLs ride the LIST item (home/list liveInfo.playUrls
+    // / board list playUrls) — Pure Live's getPlayUrls returns the
+    // quality.data lists built from liveroom.data and never fetches
+    // a room page for playback. The room page (live.kuaishou.com/u/)
+    // is rate-limited and, when it answers at all, its playList
+    // entry carries an EMPTY liveStream (verified live 2026-11-27:
+    // a room live on home/list had liveStream keys [] on its own
+    // page) — the old playURLs(roomID:) path returned [] for it.
+    // The list payload is carried on LiveRoom.playDataJSON.
+    // URLs are used VERBATIM: they are FLV (h264+aac, ffprobe-verified
+    // 2026-11-27) and mpv plays FLV natively. The old .flv→.m3u8
+    // derivation is WRONG for this CDN: the swapped URL returns
+    // HTTP 200 with FLV bytes, not a playlist (verified live
+    // 2026-11-27: 2.8 MB response starting "FLV\x01\x05"), so
+    // AVPlayer failed to parse it as HLS. Derivation removed.
 
-    func playURLs(roomID: String) async throws -> [PlayStream] {
-        let entry = try await liveEntry(userID: roomID)
+    func playURLs(room: LiveRoom) async throws -> [PlayStream] {
+        let headers = PlaybackHeaders.headers(platform: .kuaishou, roomID: room.roomID)
+        if let playData = room.playDataJSON,
+           let data = playData.data(using: .utf8),
+           let playUrls = JSONValue.parse(data) {
+            let streams = Self.streams(fromPlayUrls: playUrls, headers: headers)
+            if !streams.isEmpty { return streams }
+        }
+        // Fallback: room page (rate-limited; often an empty liveStream).
+        guard let entry = try? await liveEntry(userID: room.roomID) else { return [] }
         let liveStream = entry["liveStream"]
         guard !liveStream.isNull else { return [] }
-        return Self.streams(fromLiveStream: liveStream)
+        return Self.streams(fromLiveStream: liveStream, headers: headers)
     }
 
-    /// Pure parser for the liveStream object (Pure Live's
+    /// Pure parser for a playUrls value (Pure Live's
     /// parsePlayQualities): h264 first, hevc second, direct
-    /// adaptationSet descriptors as fallback; same-quality URLs across
-    /// CDN lines are merged and deduped. Every URL is converted to its
-    /// HLS form (see hlsURL(from:)) — AVPlayer cannot play FLV.
+    /// adaptationSet descriptors as fallback; same-quality URLs
+    /// across CDN lines are merged and deduped; URLs verbatim.
     /// Testable without the network.
-    static func streams(fromLiveStream liveStream: JSONValue) -> [PlayStream] {
-        let playUrls = liveStream["playUrls"]
-        // playUrls is a list of descriptors; a single {h264/hevc} map
-        // is also accepted.
+    static func streams(fromPlayUrls playUrls: JSONValue, headers: [String: String] = [:]) -> [PlayStream] {
+        // playUrls is a list of descriptors; a single {h264/hevc}
+        // map is also accepted.
         let descriptors = playUrls.arrayValue.isEmpty && !playUrls.isNull ? [playUrls] : playUrls.arrayValue
         var merged: [(name: String, sort: Int, codecRank: Int, urls: [String])] = []
         for descriptor in descriptors {
@@ -171,20 +194,28 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
         for entry in merged {
             // One stream per CDN line; the first line is the default.
             for (index, urlString) in entry.urls.enumerated() {
-                guard let url = hlsURL(from: urlString) else { continue }
+                guard let url = URL(string: urlString) else { continue }
                 streams.append(PlayStream(
                     url: url,
                     quality: entry.name,
-                    line: index == 0 ? "主线路" : "线路\(index + 1)"
+                    line: index == 0 ? "主线路" : "线路\(index + 1)",
+                    headers: headers
                 ))
             }
         }
         // Legacy shape: playUrls: [{url, quality, type}] and/or
         // hlsPlayUrl / playUrl string fields.
         if streams.isEmpty {
-            streams.append(contentsOf: legacyStreams(fromLiveStream: liveStream))
+            streams.append(contentsOf: legacyStreams(fromPlayUrls: playUrls, headers: headers))
         }
         return streams
+    }
+
+    /// Room-page shape: liveStream.playUrls.
+    static func streams(fromLiveStream liveStream: JSONValue, headers: [String: String] = [:]) -> [PlayStream] {
+        let streams = Self.streams(fromPlayUrls: liveStream["playUrls"], headers: headers)
+        if !streams.isEmpty { return streams }
+        return legacyStreams(fromLiveStream: liveStream, headers: headers)
     }
 
     /// The representation list of one descriptor: descriptor
@@ -198,36 +229,31 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
         return descriptor["representation"].arrayValue
     }
 
-    /// Kuaishou's CDN serves the same signed stream as HLS at the same
-    /// path with a .m3u8 suffix (verified live 2026-11-27: the swapped
-    /// URL returns a valid #EXTM3U master playlist). HLS URLs pass
-    /// through; FLV URLs are swapped; anything else is dropped.
-    static func hlsURL(from urlString: String) -> URL? {
-        guard let url = URL(string: urlString) else { return nil }
-        if urlString.contains(".m3u8") { return url }
-        guard urlString.contains(".flv"),
-              let range = urlString.range(of: ".flv", options: .backwards) else { return nil }
-        var swapped = urlString
-        swapped.replaceSubrange(range, with: ".m3u8")
-        return URL(string: swapped)
-    }
-
-    /// Legacy playUrls shape fallback. Testable without the network.
-    static func legacyStreams(fromLiveStream liveStream: JSONValue) -> [PlayStream] {
+    /// Legacy playUrls shape fallback (verbatim URLs).
+    /// Testable without the network.
+    static func legacyStreams(fromPlayUrls playUrls: JSONValue, headers: [String: String] = [:]) -> [PlayStream] {
         var streams: [PlayStream] = []
-        for item in liveStream["playUrls"].arrayValue {
+        for item in playUrls.arrayValue {
             guard let urlString = item["url"].stringValue,
-                  let url = hlsURL(from: urlString) else { continue }
+                  let url = URL(string: urlString) else { continue }
             streams.append(PlayStream(
                 url: url,
                 quality: item["quality"].stringValue ?? "自适应",
-                line: "主线路"
+                line: "主线路",
+                headers: headers
             ))
         }
+        return streams
+    }
+
+    /// Room-page legacy shape: liveStream.playUrls /
+    /// hlsPlayUrl / playUrl fields (verbatim URLs).
+    static func legacyStreams(fromLiveStream liveStream: JSONValue, headers: [String: String] = [:]) -> [PlayStream] {
+        var streams = legacyStreams(fromPlayUrls: liveStream["playUrls"], headers: headers)
         for key in ["hlsPlayUrl", "playUrl"] {
             if let urlString = liveStream[key].stringValue,
-               let url = hlsURL(from: urlString) {
-                streams.append(PlayStream(url: url, quality: "自适应", line: "主线路"))
+               let url = URL(string: urlString) {
+                streams.append(PlayStream(url: url, quality: "自适应", line: "主线路", headers: headers))
             }
         }
         return streams
@@ -328,7 +354,8 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
             coverURL: URL(string: HaoText.firstNonEmpty(item["poster"].stringValue, gameInfo["poster"].stringValue) ?? ""),
             categoryName: gameInfo["name"].stringValue,
             viewerCount: item["watchingCount"].intValue ?? 0,
-            isLive: true
+            isLive: true,
+            playDataJSON: item["playUrls"].jsonString
         )
     }
 
@@ -348,7 +375,8 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
             coverURL: URL(string: item["poster"].stringValue ?? ""),
             categoryName: gameInfo["name"].stringValue,
             viewerCount: item["watchingCount"].intValue ?? 0,
-            isLive: true
+            isLive: true,
+            playDataJSON: item["playUrls"].jsonString
         )
     }
 

@@ -16,9 +16,8 @@
 //     legacy: web_stream_url.hls_pull_url_map and .hls_pull_url
 //       (qualityKey -> URL string or {url_list: [...]})
 //   Quality keys are joined by key, never by position; "ao" is
-//   audio-only and is skipped. Only HLS URLs are offered (AVPlayer
-//   cannot play FLV); stream_data's main.flv is the FLV-engine input
-//   for later.
+//   audio-only and is skipped. Per quality the URLs keep Pure
+//   Live's order — FLV first, then HLS — and mpv plays both.
 //   Quality keys: FULL_HD1 原画, HD1 超清, SD1 高清, SD2 标清.
 // NOT verifiable from this VM — the webcast JSON APIs all refuse
 // this egress IP (feed: "url doesn't match", enter: empty reply,
@@ -129,34 +128,48 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Play URLs
 
-    func playURLs(roomID: String) async throws -> [PlayStream] {
-        let roomInfo = try await roomInfo(for: roomID)
+    func playURLs(room: LiveRoom) async throws -> [PlayStream] {
+        let roomInfo = try await roomInfo(for: room.roomID)
         let streamURL = roomInfo["web_stream_url"]
         guard !streamURL.isNull else { return [] } // offline: no stream
-        return Self.streams(fromStreamURL: streamURL)
+        let headers = PlaybackHeaders.headers(platform: .douyin, roomID: room.roomID)
+        return Self.streams(fromStreamURL: streamURL, headers: headers)
     }
 
-    /// Pure parser for the whole web_stream_url object: the modern
-    /// live_core_sdk_data.pull_data.stream_data payload (a JSON string;
-    /// per quality key, main.hls) joined by quality key with the
-    /// legacy hls_pull_url_map and hls_pull_url maps. Audio-only
-    /// ("ao") keys are skipped — they carry no video track.
+    /// Pure parser for the whole web_stream_url object (Pure Live's
+    /// parseStreamQualities): the modern live_core_sdk_data.pull_data
+    /// .stream_data payload (a JSON string; per quality key, main.flv
+    /// + main.hls) joined by quality key with the legacy
+    /// flv_pull_url / hls_pull_url_map / hls_pull_url maps. Per key
+    /// the URLs keep Pure Live's order — FLV first, then HLS — so
+    /// the player tries the FLV line before its HLS twin.
+    /// Audio-only ("ao") keys are skipped — they carry no video track.
     /// Testable without the network.
-    static func streams(fromStreamURL streamURL: JSONValue) -> [PlayStream] {
+    static func streams(fromStreamURL streamURL: JSONValue, headers: [String: String] = [:]) -> [PlayStream] {
         // Modern payload: stream_data is a JSON string
         // {"data": {qualityKey: {main: {flv, hls}}}}.
-        var modernHLS: [String: String] = [:]
+        var modern: [String: [String]] = [:]
         if let text = streamURL["live_core_sdk_data"]["pull_data"]["stream_data"].stringValue,
            let data = text.data(using: .utf8),
            let json = JSONValue.parse(data) {
             for (key, value) in json["data"].objectValue {
-                if let hls = value["main"]["hls"].stringValue, !hls.isEmpty {
-                    modernHLS[key.lowercased()] = hls
-                }
+                var urls: [String] = []
+                if let flv = value["main"]["flv"].stringValue, !flv.isEmpty { urls.append(flv) }
+                if let hls = value["main"]["hls"].stringValue, !hls.isEmpty { urls.append(hls) }
+                if !urls.isEmpty { modern[key.lowercased()] = urls }
             }
         }
         // Legacy maps: qualityKey -> URL string or {url_list: [...]}.
+        var legacyFLV: [String: String] = [:]
         var legacyHLS: [String: String] = [:]
+        for key in ["flv_pull_url"] {
+            for (mapKey, value) in streamURL[key].objectValue {
+                let urlString = value.stringValue ?? value["url_list"][0].stringValue
+                if let urlString, !urlString.isEmpty {
+                    legacyFLV[mapKey.lowercased()] = urlString
+                }
+            }
+        }
         for mapKey in ["hls_pull_url_map", "hls_pull_url"] {
             for (key, value) in streamURL[mapKey].objectValue {
                 let urlString = value.stringValue ?? value["url_list"][0].stringValue
@@ -174,22 +187,31 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
             }
         }
         // All quality keys, joined by key (never by position).
-        var keys = Array(modernHLS.keys)
-        for key in legacyHLS.keys where !keys.contains(key) {
-            keys.append(key)
-        }
+        var keys = Array(modern.keys)
+        for key in legacyFLV.keys where !keys.contains(key) { keys.append(key) }
+        for key in legacyHLS.keys where !keys.contains(key) { keys.append(key) }
         // Known rank first (原画 > 超清 > 高清 > 标清), then the rest.
         let rank = ["full_hd1": 0, "hd1": 1, "sd1": 2, "sd2": 3]
         keys.sort { (rank[$0] ?? 99) < (rank[$1] ?? 99) }
         var streams: [PlayStream] = []
         for key in keys {
             if key == "ao" { continue } // audio-only pull URL, no video
-            guard let urlString = modernHLS[key] ?? legacyHLS[key],
-                  let url = URL(string: urlString) else { continue }
+            var urls = modern[key] ?? []
+            if let flv = legacyFLV[key], !urls.contains(flv) { urls.append(flv) }
+            if let hls = legacyHLS[key], !urls.contains(hls) { urls.append(hls) }
+            guard !urls.isEmpty else { continue }
             let display = resolutionNames[key]
                 ?? Self.qualityNames[key.uppercased()]
                 ?? key
-            streams.append(PlayStream(url: url, quality: display, line: "主线路"))
+            for (index, urlString) in urls.enumerated() {
+                guard let url = URL(string: urlString) else { continue }
+                streams.append(PlayStream(
+                    url: url,
+                    quality: display,
+                    line: index == 0 ? "主线路" : "线路\(index + 1)",
+                    headers: headers
+                ))
+            }
         }
         return streams
     }
