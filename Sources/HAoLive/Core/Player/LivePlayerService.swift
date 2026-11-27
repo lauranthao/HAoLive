@@ -6,13 +6,12 @@
 //   -> nothing left -> fail honestly. "Fails" means the engine
 //   reported a hard error, or no frame appeared within the
 //   source-ready timeout (18 s, Pure Live's sourceReadyTimeout).
-// Engine order: mpv ONLY — chen 2026-11-27 19:03 decided the
-// system player goes ("系统播放器就不要了"). Pure Live's chain
-// is mediaKit -> IJK -> BetterPlayer, but BetterPlayer on iOS IS
-// AVPlayer, and chen's decision is to skip that registration
-// (IJK's format coverage is a subset of mpv's, so it adds
-// nothing here). If mpv fails to initialise, the service fails
-// honestly — there is no fallback engine.
+// Engine order: mpv pinned first (when the libmpv module is
+// present), then the system player for HLS only — the chain as
+// Pure Live registers it (mediaKit -> IJK -> BetterPlayer; IJK's
+// format coverage is a subset of mpv's, so it adds nothing here,
+// and BetterPlayer on iOS IS AVPlayer). chen 2026-11-27 19:53
+// decided to KEEP the system-player fallback ("留").
 // Before the next engine, sources are re-resolved through
 // sourceRefresh (Pure Live's onEngineFallbackSources: signed URLs
 // are single-use, so a fresh resolve is needed per engine).
@@ -178,6 +177,7 @@ final class LivePlayerService: ObservableObject {
             list.append(mpv)
         }
         #endif
+        list.append(AVPlayerEngine())
         return list
     }
 

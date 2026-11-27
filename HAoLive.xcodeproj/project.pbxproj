@@ -67,6 +67,8 @@
 		9F899E947CD387F2CD3F7E97 = {isa = PBXBuildFile; fileRef = 923AC28900A176DC67F65310; };
 		6AF9ABBB69A4BFD1C552DF33 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerEngine.swift; sourceTree = "<group>"; };
 		3854E8BFEBA93E709E536B0E = {isa = PBXBuildFile; fileRef = 6AF9ABBB69A4BFD1C552DF33; };
+		3F8C32CA2D7221E917E10319 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AVPlayerEngine.swift; sourceTree = "<group>"; };
+		54B9F575B9DD40FCDB0F2B29 = {isa = PBXBuildFile; fileRef = 3F8C32CA2D7221E917E10319; };
 		6C6B0C0A2223BDD66A1010CB = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MpvPlayerEngine.swift; sourceTree = "<group>"; };
 		4120B705C126BA10B993CEF4 = {isa = PBXBuildFile; fileRef = 6C6B0C0A2223BDD66A1010CB; };
 		87C27D7D6E8F23741D6DD38A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesStore.swift; sourceTree = "<group>"; };
@@ -175,6 +177,7 @@
 				89ED69F9FF508AE7EE769E5C,
 				923AC28900A176DC67F65310,
 				6AF9ABBB69A4BFD1C552DF33,
+				3F8C32CA2D7221E917E10319,
 				6C6B0C0A2223BDD66A1010CB,
 			);
 			name = Player;
@@ -365,6 +368,7 @@
 				2D7FBD39E2A07F5B76FB3C7A,
 				9F899E947CD387F2CD3F7E97,
 				3854E8BFEBA93E709E536B0E,
+				54B9F575B9DD40FCDB0F2B29,
 				4120B705C126BA10B993CEF4,
 				C72003B663B760C3E09BD7C5,
 				109763D21E817FE8E588F0D1,
