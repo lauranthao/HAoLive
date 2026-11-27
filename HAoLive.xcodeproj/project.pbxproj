@@ -69,16 +69,8 @@
 		7BD2DCB8A5A46175BF4974CC = {isa = PBXBuildFile; fileRef = 6BFB31E5838C4F385B06F9C0; };
 		9365B9A7FD7107BF71FC280C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CategoriesView.swift; sourceTree = "<group>"; };
 		79F1BEF9AB57C405C3C8D2E0 = {isa = PBXBuildFile; fileRef = 9365B9A7FD7107BF71FC280C; };
-		EB169C0F186308016C6EF54F = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingsView.swift; sourceTree = "<group>"; };
-		28C4C41A603BDA7FC4644BB3 = {isa = PBXBuildFile; fileRef = EB169C0F186308016C6EF54F; };
-		97557199660FEB9EB23312F5 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSPlaylist.swift; sourceTree = "<group>"; };
-		137D5BD8EB859F6BF0422082 = {isa = PBXBuildFile; fileRef = 97557199660FEB9EB23312F5; };
-		2E6EE97B679FC2D7DE7F28B4 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveRecorder.swift; sourceTree = "<group>"; };
-		849E46E9D972D303CCAAD784 = {isa = PBXBuildFile; fileRef = 2E6EE97B679FC2D7DE7F28B4; };
-		85A7A0D8F7503DCF06987A0F = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingStore.swift; sourceTree = "<group>"; };
-		116B047CCF1ED691D7C96167 = {isa = PBXBuildFile; fileRef = 85A7A0D8F7503DCF06987A0F; };
-		5CB068548F3734D5AD54935A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingPlayerView.swift; sourceTree = "<group>"; };
-		E7D2732670853949CB78E237 = {isa = PBXBuildFile; fileRef = 5CB068548F3734D5AD54935A; };
+		E3BD360F0D9685071BD259FB = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
+		D53DEE531307626270F83742 = {isa = PBXBuildFile; fileRef = E3BD360F0D9685071BD259FB; };
 		9E0C475DFB03D0E58115FBF6 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveRoomView.swift; sourceTree = "<group>"; };
 		33C5ADB9EDD44D4BEF165642 = {isa = PBXBuildFile; fileRef = 9E0C475DFB03D0E58115FBF6; };
 		11533A1166409B1AFFA444E4 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomCard.swift; sourceTree = "<group>"; };
@@ -182,17 +174,6 @@
 			path = Storage;
 			sourceTree = "<group>";
 		};
-		D18B817A5638D754830F3994 = {
-			isa = PBXGroup;
-			children = (
-				97557199660FEB9EB23312F5,
-				2E6EE97B679FC2D7DE7F28B4,
-				85A7A0D8F7503DCF06987A0F,
-			);
-			name = Recorder;
-			path = Recorder;
-			sourceTree = "<group>";
-		};
 		4CEC6835386DE4704668B415 = {
 			isa = PBXGroup;
 			children = (
@@ -220,14 +201,13 @@
 			path = Categories;
 			sourceTree = "<group>";
 		};
-		EA3A65B86AF9607EE0BD9704 = {
+		2C6B23BCC3481F95570A5D96 = {
 			isa = PBXGroup;
 			children = (
-				EB169C0F186308016C6EF54F,
-				5CB068548F3734D5AD54935A,
+				E3BD360F0D9685071BD259FB,
 			);
-			name = Recordings;
-			path = Recordings;
+			name = History;
+			path = History;
 			sourceTree = "<group>";
 		};
 		2654D6008554C4E75CE6FF27 = {
@@ -286,7 +266,6 @@
 				4263957B4D93EA5617C2FA95,
 				537D51A7B63624CD653391B4,
 				BF85A818CBD222B5A13A22CF,
-				D18B817A5638D754830F3994,
 			);
 			name = Core;
 			path = Core;
@@ -298,7 +277,7 @@
 				4CEC6835386DE4704668B415,
 				A913BFE13E39847FAD773DC2,
 				0B910740E9F7FE9E9C373ADA,
-				EA3A65B86AF9607EE0BD9704,
+				2C6B23BCC3481F95570A5D96,
 				2654D6008554C4E75CE6FF27,
 				5C93415700405E4C4DF85C7C,
 				2C3495591E10CB2A6AB17552,
@@ -369,11 +348,7 @@
 				206C18CE94596F3050E8FB46,
 				7BD2DCB8A5A46175BF4974CC,
 				79F1BEF9AB57C405C3C8D2E0,
-				28C4C41A603BDA7FC4644BB3,
-				137D5BD8EB859F6BF0422082,
-				849E46E9D972D303CCAAD784,
-				116B047CCF1ED691D7C96167,
-				E7D2732670853949CB78E237,
+				D53DEE531307626270F83742,
 				33C5ADB9EDD44D4BEF165642,
 				CCB32786AC313A044440493E,
 				8209D3F5A6F84A50E183D1C4,
@@ -489,7 +464,7 @@
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_TESTABILITY = YES;
 				GCC_OPTIMIZATION_LEVEL = 0;
@@ -550,7 +525,7 @@
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
 				COPY_PHASE_STRIP = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				GCC_OPTIMIZATION_LEVEL = s;

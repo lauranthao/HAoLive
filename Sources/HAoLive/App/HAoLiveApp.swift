@@ -8,7 +8,6 @@ struct HAoLiveApp: App {
     @StateObject private var favoritesStore = FavoritesStore()
     @StateObject private var historyStore = HistoryStore()
     @StateObject private var settingsStore = SettingsStore()
-    @StateObject private var recorder = LiveRecorder()
 
     var body: some Scene {
         WindowGroup {
@@ -16,8 +15,6 @@ struct HAoLiveApp: App {
                 .environmentObject(favoritesStore)
                 .environmentObject(historyStore)
                 .environmentObject(settingsStore)
-                .environmentObject(recorder)
-                .environmentObject(recorder.store)
                 .preferredColorScheme(colorScheme)
         }
     }

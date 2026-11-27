@@ -13,7 +13,6 @@ struct LiveRoomView: View {
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @EnvironmentObject private var historyStore: HistoryStore
     @EnvironmentObject private var settingsStore: SettingsStore
-    @EnvironmentObject private var recorder: LiveRecorder
 
     @StateObject private var playerService = LivePlayerService()
     @State private var streams: [PlayStream] = []
@@ -22,8 +21,6 @@ struct LiveRoomView: View {
     @State private var visibleDanmaku: [DanmakuItem] = []
     @State private var loadError: String?
     @State private var danmakuTask: Task<Void, Never>?
-    @State private var recordAlert: String?
-    @State private var tick = Date()
 
     var body: some View {
         ScrollView {
@@ -52,15 +49,6 @@ struct LiveRoomView: View {
                 playerService.switchStream(stream)
             }
         }
-        .alert("录制", isPresented: Binding(
-            get: { recordAlert != nil },
-            set: { if !$0 { recordAlert = nil } }
-        )) {
-            Button("好", role: .cancel) {}
-        } message: {
-            Text(recordAlert ?? "")
-        }
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { tick = $0 }
         .task { await enterRoom() }
         .onDisappear {
             danmakuTask?.cancel()
@@ -158,50 +146,10 @@ struct LiveRoomView: View {
             }
             .buttonStyle(.bordered)
 
-            Button {
-                toggleRecording()
-            } label: {
-                if recorder.isRecording(room: room) {
-                    Label("录制中 \(elapsedText)", systemImage: "stop.circle.fill")
-                } else {
-                    Label("录制", systemImage: "record.circle")
-                }
-            }
-            .buttonStyle(.bordered)
-            .foregroundStyle(recorder.isRecording(room: room) ? HaoLiveDesign.liveRed : .primary)
-            .disabled(playerService.currentStream == nil)
-
             Spacer()
         }
         .padding(.horizontal, HaoLiveDesign.pagePadding)
         .padding(.top, 12)
-    }
-
-    /// Wall-clock time since this room's recording started, for the
-    /// "录制中 mm:ss" label. Ticks once a second while the view is open.
-    private var elapsedText: String {
-        guard let startedAt = recorder.active?.startedAt else { return "" }
-        return RecordingFormatters.duration(tick.timeIntervalSince(startedAt))
-    }
-
-    /// Start recording the stream the player is playing, or stop this
-    /// room's recording. Recording captures the same URL the player
-    /// plays and runs independently of playback: leaving the room does
-    /// not stop it (stop from here or from the 录制 tab).
-    private func toggleRecording() {
-        if recorder.isRecording(room: room) {
-            Task { await recorder.stop() }
-            return
-        }
-        guard let stream = playerService.currentStream else { return }
-        switch recorder.start(room: room, stream: stream) {
-        case .started, .alreadyRecording:
-            break
-        case .busy(let title):
-            recordAlert = "正在录制「\(title)」，请先停止那个录制"
-        case .failed(let message):
-            recordAlert = message
-        }
     }
 
     private var aboutArea: some View {
