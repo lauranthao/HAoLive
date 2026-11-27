@@ -19,17 +19,16 @@ import AVFoundation
 import Foundation
 import UIKit
 
-final class AVPlayerEngine: PlayerEngine {
+@MainActor final class AVPlayerEngine: PlayerEngine {
     let name = "系统播放器"
 
     weak var delegate: (any PlayerEngineDelegate)?
 
     private let player = AVPlayer()
-    // No default value: AVPlayerView() is a @MainActor-isolated
-    // initializer, and a stored-property default is checked against
-    // the TYPE's (nonisolated) isolation — marking init() @MainActor
-    // does not cover it (primary #20: same error survived the
-    // @MainActor init). Assigned in the @MainActor init body instead.
+    // Assigned in the init body (primary #20's lesson — same note as
+    // MpvPlayerEngine: a @MainActor-isolated default could not live
+    // in a nonisolated class). The class is @MainActor now; the
+    // init-body assignment stays as-is.
     private let playerView: AVPlayerView
     private var statusObservation: NSKeyValueObservation?
     private var failureObserver: NSObjectProtocol?
@@ -42,10 +41,11 @@ final class AVPlayerEngine: PlayerEngine {
 
     var isPlaying: Bool { opened && !paused }
 
+    // @MainActor on the class (build 7, primary #25): with the class
+    // main-actor-isolated, `self` in the Task hops below is legal —
+    // the same "sending 'self'" fix as MpvPlayerEngine.
     // AVPlayerView() is a @MainActor-isolated initializer (Swift 6 /
-    // iOS 26 SDK), so this init must be @MainActor — a nonisolated
-    // init cannot hold a main-actor-isolated default value (primary
-    // #19). Called only from the @MainActor service's makeEngines().
+    // iOS 26 SDK). Called only from the @MainActor service's makeEngines().
     @MainActor init() {
         self.playerView = AVPlayerView()
         playerView.setPlayer(player)

@@ -48,28 +48,37 @@ import CoreGraphics
 import Foundation
 import UIKit
 
-final class MpvPlayerEngine: PlayerEngine {
+@MainActor final class MpvPlayerEngine: PlayerEngine {
     let name = "mpv"
 
     weak var delegate: (any PlayerEngineDelegate)?
 
-    private var handle: OpaquePointer?
-    private var renderContext: OpaquePointer?
+    // The mpv-facing state below is touched from libmpv's own
+    // threads (the event loop and the render thread), so it is
+    // nonisolated(unsafe): libmpv is designed for multi-threaded use
+    // (mpv_wait_event blocks on one thread while commands go from
+    // others), and every other property stays main-actor-isolated.
+    // `destroying` is a loop flag; `renderPending` a coalescing flag
+    // (a torn read only costs one extra frame render); `renderSize`
+    // is written by the property-change handler and read by the
+    // render thread — a mismatched pair only sizes one frame wrong.
+    private nonisolated(unsafe) var handle: OpaquePointer?
+    private nonisolated(unsafe) var renderContext: OpaquePointer?
     private var eventThread: Thread?
-    private var destroying = false
+    private nonisolated(unsafe) var destroying = false
     private var opened = false
     private var paused = false
     private var firstFrameReported = false
-    private var renderPending = false
-    private var renderSize = CGSize(width: 1280, height: 720)
-    private var frameBuffer: UnsafeMutableRawPointer?
-    private var frameBufferSize = 0
+    private nonisolated(unsafe) var renderPending = false
+    private nonisolated(unsafe) var renderSize = CGSize(width: 1280, height: 720)
+    private nonisolated(unsafe) var frameBuffer: UnsafeMutableRawPointer?
+    private nonisolated(unsafe) var frameBufferSize = 0
 
-    // No default value: MpvVideoView() is a @MainActor-isolated
-    // initializer, and a stored-property default is checked against
-    // the TYPE's (nonisolated) isolation — marking init() @MainActor
-    // does not cover it (primary #20). Assigned in the @MainActor
-    // init body instead, before the early returns.
+    // Assigned in the init body (primary #20's lesson: when the class
+    // was nonisolated, a stored-property default was checked against
+    // the type's isolation, so MpvVideoView() could not be a default
+    // even with a @MainActor init). The class is @MainActor now, so a
+    // default would work — the init-body assignment stays as-is.
     private let videoViewInstance: MpvVideoView
     var videoView: UIView { videoViewInstance }
 
@@ -87,9 +96,9 @@ final class MpvPlayerEngine: PlayerEngine {
     // MARK: - Lifecycle
 
     // MpvVideoView() is a @MainActor-isolated initializer (Swift 6 /
-    // iOS 26 SDK), so this init must be @MainActor — a nonisolated
-    // init cannot hold a main-actor-isolated default value (primary
-    // #19). Called only from the @MainActor service's makeEngines().
+    // iOS 26 SDK); the whole class is @MainActor now (primary #25),
+    // so the init is too. Called only from the @MainActor service's
+    // makeEngines().
     @MainActor init() {
         self.videoViewInstance = MpvVideoView()
         guard let handle = mpv_create() else { return }
@@ -108,7 +117,9 @@ final class MpvPlayerEngine: PlayerEngine {
     /// and drops the engine afterwards — a destroyed engine is never
     /// re-opened; the service creates a fresh one on the next open().
     /// The event thread owns the final free, so this only signals.
-    func destroy() {
+    /// nonisolated: deinit (nonisolated) calls it, and it only touches
+    /// nonisolated(unsafe) state.
+    nonisolated func destroy() {
         guard let handle else { return }
         destroying = true
         mpv_wakeup(handle)
@@ -122,12 +133,10 @@ final class MpvPlayerEngine: PlayerEngine {
 
     func open(url: URL, headers: [String: String], format: String) {
         guard let handle else {
-            // open() is a nonisolated protocol witness, so it cannot
-            // itself be @MainActor — hop for the @MainActor delegate.
-            // No [weak self] here: Task { @MainActor [weak self] in } from
-            // nonisolated code errors "sending 'self' risks causing data
-            // races" (primary #23). The one-shot hop captures self strongly,
-            // like AVPlayerEngine does — no cycle, the Task ends with its run.
+            // The class is @MainActor, so `self` in the hop below is
+            // main-actor-isolated and legal (primary #25 — the #23
+            // strong-capture fix did not take because the error was
+            // never the capture list).
             Task { @MainActor in
                 self.delegate?.engine(self, didFailWith: "mpv 未能初始化")
             }
@@ -256,7 +265,9 @@ final class MpvPlayerEngine: PlayerEngine {
         }
     }
 
-    private func errorMessage(_ code: Int32) -> String {
+    /// Pure C call, no instance state — nonisolated so the event-loop
+    /// handler can use it.
+    nonisolated private func errorMessage(_ code: Int32) -> String {
         guard let cString = mpv_error_string(code) else { return "播放失败" }
         return String(cString: cString)
     }
@@ -295,7 +306,9 @@ final class MpvPlayerEngine: PlayerEngine {
     }
 
     /// Called on libmpv's render thread when a new frame is available.
-    private func renderUpdateRequested() {
+    /// nonisolated: the C update callback (see createRenderContext)
+    /// and the event loop call this off the main actor.
+    nonisolated private func renderUpdateRequested() {
         guard !renderPending else { return }
         renderPending = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -303,7 +316,12 @@ final class MpvPlayerEngine: PlayerEngine {
         }
     }
 
-    private func renderFrame() {
+    /// Runs on a background queue (see renderUpdateRequested).
+    /// nonisolated: touches only nonisolated(unsafe) render state,
+    /// then hops to the main actor for the view + delegate. The
+    /// first-frame flag is read and set inside the hop — the render
+    /// thread must not touch @MainActor state.
+    nonisolated private func renderFrame() {
         defer { renderPending = false }
         guard let context = renderContext else { return }
         let width = Int(renderSize.width)
@@ -350,11 +368,10 @@ final class MpvPlayerEngine: PlayerEngine {
             }
         }
         guard let image else { return }
-        let isFirst = !firstFrameReported
-        if isFirst { firstFrameReported = true }
         Task { @MainActor in
             self.videoViewInstance.display(image)
-            if isFirst {
+            if !self.firstFrameReported {
+                self.firstFrameReported = true
                 self.delegate?.engineDidRenderFirstFrame(self)
                 self.delegate?.engineDidBecomeReady(self)
             }
@@ -373,7 +390,10 @@ final class MpvPlayerEngine: PlayerEngine {
         thread.start()
     }
 
-    private func eventLoop() {
+    /// Dedicated thread; mpv_wait_event blocks. nonisolated: touches
+    /// only nonisolated(unsafe) mpv state, and the handlers below
+    /// extract plain values before hopping to the main actor.
+    nonisolated private func eventLoop() {
         guard let handle else { return }
         while !destroying {
             guard let event = mpv_wait_event(handle, 1.0) else { continue }
@@ -403,27 +423,33 @@ final class MpvPlayerEngine: PlayerEngine {
         frameBufferSize = 0
     }
 
-    private func handleEndFile(_ event: mpv_event) {
+    /// nonisolated (called from the event loop): extract the failure
+    /// message as a plain String, then hop — the `opened` check and
+    /// the delegate call both live on the main actor.
+    nonisolated private func handleEndFile(_ event: mpv_event) {
         // A live stream ending (EOF) or erroring is a hard failure —
         // the sweep advances to the next candidate.
-        guard opened, let data = event.data else { return }
+        guard let data = event.data else { return }
         let endFile = data.assumingMemoryBound(to: mpv_event_end_file.self).pointee
+        let message: String
         switch endFile.reason {
         case MPV_END_FILE_REASON_ERROR:
-            let message = endFile.error != 0 ? errorMessage(endFile.error) : "播放失败"
-            Task { @MainActor in
-                self.delegate?.engine(self, didFailWith: message)
-            }
+            message = endFile.error != 0 ? errorMessage(endFile.error) : "播放失败"
         case MPV_END_FILE_REASON_EOF:
-            Task { @MainActor in
-                self.delegate?.engine(self, didFailWith: "直播流已结束")
-            }
+            message = "直播流已结束"
         default:
-            break
+            return
+        }
+        Task { @MainActor in
+            guard self.opened else { return }
+            self.delegate?.engine(self, didFailWith: message)
         }
     }
 
-    private func handlePropertyChange(_ event: mpv_event) {
+    /// nonisolated (called from the event loop): renderSize is
+    /// nonisolated(unsafe) — written here, read by the render thread
+    /// — so it is updated directly, no hop.
+    nonisolated private func handlePropertyChange(_ event: mpv_event) {
         guard let data = event.data else { return }
         let property = data.assumingMemoryBound(to: mpv_event_property.self).pointee
         guard property.format == MPV_FORMAT_INT64, let valuePtr = property.data else { return }

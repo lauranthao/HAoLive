@@ -15,7 +15,19 @@ import UIKit
 
 /// One playback backend. Engines are created once by the service and
 /// reused across opens; `open` replaces the current media.
-protocol PlayerEngine: AnyObject {
+///
+/// @MainActor (build 7, primary #25): the protocol and both engine
+/// classes are main-actor-isolated. The #23 fix — changing the Task
+/// hops from `[weak self]` to a strong capture — did not take, because
+/// the error was never the capture list: a non-Sendable, nonisolated
+/// `self` cannot be *used* inside a `Task { @MainActor in }` at all
+/// (passing it as the delegate's engine argument, or reading its
+/// @MainActor view). With the class @MainActor, `self` is already
+/// main-actor-isolated, so the hops are legal. Only libmpv's own
+/// threads (event loop, render callback) run off the main actor, and
+/// those paths are `nonisolated` with explicit hops — see
+/// MpvPlayerEngine.
+@MainActor protocol PlayerEngine: AnyObject {
     /// "mpv" / "系统播放器" — shown in the player UI and logs.
     var name: String { get }
 
