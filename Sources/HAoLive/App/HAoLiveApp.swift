@@ -10,7 +10,9 @@ import UIKit
 /// system orientation lock ON because the AppDelegate below overrides
 /// the supported orientations for the window.
 final class OrientationLock {
-    static let shared = OrientationLock()
+    // Only ever touched from the main thread (SwiftUI lifecycle +
+    // AppDelegate), so the shared instance needs no isolation.
+    nonisolated(unsafe) static let shared = OrientationLock()
 
     private(set) var supportedOrientations: UIInterfaceOrientationMask = .portrait
 

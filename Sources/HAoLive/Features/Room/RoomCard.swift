@@ -12,7 +12,9 @@ import UIKit
 /// request carries the platform's Referer (Pure Live does the same
 /// for its room cards).
 final class CoverImageCache {
-    static let shared = CoverImageCache()
+    // NSCache and URLSession are both thread-safe; the cache holds no
+    // other mutable state, so the shared instance needs no isolation.
+    nonisolated(unsafe) static let shared = CoverImageCache()
 
     private let cache = NSCache<NSString, UIImage>()
     private let session = URLSession.shared
