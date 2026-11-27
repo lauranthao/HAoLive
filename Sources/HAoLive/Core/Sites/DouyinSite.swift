@@ -330,10 +330,24 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
 
     func playURLs(room: LiveRoom) async throws -> [PlayStream] {
         let roomInfo = try await roomInfo(for: room.roomID)
-        let streamURL = roomInfo["web_stream_url"]
-        guard !streamURL.isNull else { return [] } // offline: no stream
-        let headers = PlaybackHeaders.headers(platform: .douyin, roomID: room.roomID)
-        return Self.streams(fromStreamURL: streamURL, headers: headers)
+        // Pure Live reads the stream from the ROOM object
+        // (roomStore.roomInfo.room.stream_url, douyin_site.dart:627);
+        // the old web_stream_url field on roomInfo is null even when
+        // the store hydrates, which is why rooms "showed but never
+        // played". The legacy field stays as a fallback.
+        let streamURL = roomInfo["room"]["stream_url"]
+        let legacy = roomInfo["web_stream_url"]
+        let stream = !streamURL.isNull ? streamURL : legacy
+        guard !stream.isNull else { return [] } // offline: no stream
+        // Stream requests carry the anonymous cookie too (Pure Live
+        // puts headers["cookie"] on the stream data). The FLV URL
+        // played without it from this VM, but the cookie is what
+        // the web client sends, and some lines gate on it.
+        var headers = PlaybackHeaders.headers(platform: .douyin, roomID: room.roomID)
+        if let cookie = await Self.requestHeaders()["Cookie"], !cookie.isEmpty {
+            headers["Cookie"] = cookie
+        }
+        return Self.streams(fromStreamURL: stream, headers: headers)
     }
 
     /// Pure parser for the whole web_stream_url object (Pure Live's
@@ -390,27 +404,61 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
         var keys = Array(modern.keys)
         for key in legacyFLV.keys where !keys.contains(key) { keys.append(key) }
         for key in legacyHLS.keys where !keys.contains(key) { keys.append(key) }
-        // Known rank first (原画 > 超清 > 高清 > 标清), then the rest.
-        let rank = ["full_hd1": 0, "hd1": 1, "sd1": 2, "sd2": 3]
-        keys.sort { (rank[$0] ?? 99) < (rank[$1] ?? 99) }
+        // Display names + rank from
+        // live_core_sdk_data.pull_data.options.qualities (Pure Live's
+        // parseStreamQualities, authoritative): sdk_key -> (name,
+        // level). Legacy keys map onto the modern sdk_keys — the
+        // reflow payload proves origin FLV == FULL_HD1 FLV,
+        // ld == SD1, sd == SD2 (identical URLs), so the same URL
+        // must not appear twice under two quality buttons.
+        var qualityInfo: [String: (name: String, level: Int)] = [:]
+        for quality in streamURL["live_core_sdk_data"]["pull_data"]["options"]["qualities"].arrayValue {
+            guard let key = quality["sdk_key"].stringValue?.lowercased(), !key.isEmpty else { continue }
+            qualityInfo[key] = (quality["name"].stringValue ?? key, quality["level"].intValue ?? 0)
+        }
+        // Pure Live's _douyinQualityRank, verbatim: ORIGIN 6M >
+        // FULL_HD1/UHD 5M > HD1/HD 4M > SD2/SD 3M > SD1/LD 2M >
+        // MD 1M; unknown keys fall back to the options level
+        // (level * 1M), then 0. The options level agrees with the
+        // table for the modern keys (ld 1, sd 2, origin 3).
+        func rank(of key: String) -> Int {
+            switch key.uppercased() {
+            case "ORIGIN", "ORIGION": return 6_000_000
+            case "FULL_HD1", "UHD": return 5_000_000
+            case "HD1", "HD": return 4_000_000
+            case "SD2", "SD": return 3_000_000
+            case "SD1", "LD": return 2_000_000
+            case "MD": return 1_000_000
+            default:
+                if let level = qualityInfo[key]?.level, level > 0 { return level * 1_000_000 }
+                return 0
+            }
+        }
+        // Higher rank first (原画 > 超清 > 高清 > 标清), then the rest.
+        keys.sort { rank(of: $0) > rank(of: $1) }
         var streams: [PlayStream] = []
+        var emittedURLs: Set<String> = []
         for key in keys {
             if key == "ao" { continue } // audio-only pull URL, no video
             var urls = modern[key] ?? []
             if let flv = legacyFLV[key], !urls.contains(flv) { urls.append(flv) }
             if let hls = legacyHLS[key], !urls.contains(hls) { urls.append(hls) }
             guard !urls.isEmpty else { continue }
-            let display = resolutionNames[key]
+            let display = qualityInfo[key]?.name
+                ?? resolutionNames[key]
                 ?? Self.qualityNames[key.uppercased()]
                 ?? key
-            for (index, urlString) in urls.enumerated() {
-                guard let url = URL(string: urlString) else { continue }
+            var lineIndex = 0
+            for urlString in urls {
+                guard !emittedURLs.contains(urlString), let url = URL(string: urlString) else { continue }
+                emittedURLs.insert(urlString)
                 streams.append(PlayStream(
                     url: url,
                     quality: display,
-                    line: index == 0 ? "主线路" : "线路\(index + 1)",
+                    line: lineIndex == 0 ? "主线路" : "线路\(lineIndex + 1)",
                     headers: headers
                 ))
+                lineIndex += 1
             }
         }
         return streams
@@ -452,17 +500,87 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
     /// roomStore.roomInfo for a web_rid. The room page embeds
     /// roomStore twice — an empty initial store, then the hydrated
     /// one — so the first populated copy wins; a page whose store
-    /// never hydrates has no room to show.
-    private func roomInfo(for webRID: String) async throws -> JSONValue {
-        let html = try await pageHTML(path: webRID)
+    /// never hydrates has no room to show. Pure Live dispatches by
+    /// id length (douyin_site.dart:422-428): <= 16 chars is a
+    /// web_rid (enter API, then HTML), longer is the 19-digit
+    /// internal id (reflow/info API).
+    private func roomInfo(for roomID: String) async throws -> JSONValue {
+        if roomID.count > 16 {
+            // 19-digit internal id (the ids feed/category return):
+            // reflow/info — Pure Live's ByRoomId route. The room
+            // page cannot serve these ids.
+            return try await roomInfoFromReflow(roomID: roomID)
+        }
+        // Short web_rid: signed enter API first (Pure Live's
+        // primary ByWebRid route), the hydrated room page as
+        // fallback. The page fetch MUST carry the browser headers
+        // (build 9 sent none — the page came back 200 with an
+        // empty body).
+        if let entered = try? await roomInfoFromEnter(webRID: roomID) {
+            return entered
+        }
+        let headers = await Self.requestHeaders()
+        let html = try await pageHTML(path: roomID, headers: headers)
         let stores = HaoText.extractAllEscapedJSONObjects(html, marker: "roomStore").compactMap { text -> JSONValue? in
             guard let data = text.data(using: .utf8) else { return nil }
             return JSONValue.parse(data)
         }
         guard let roomInfo = Self.roomInfo(fromRoomStores: stores) else {
-            throw LiveSiteError.roomNotFound(webRID)
+            throw LiveSiteError.roomNotFound(roomID)
         }
         return roomInfo
+    }
+
+    /// reflow/info — Pure Live's ByRoomId route
+    /// (douyin_site.dart:695-710). Returns the roomInfo-shaped
+    /// object the rest of the site expects: {room, anchor,
+    /// web_stream_url}. VM-verified 2026-11-27: HTTP 200,
+    /// data.room status 2 with stream_url (flv_pull_url
+    /// FULL_HD1/SD1/SD2 + hls_pull_url_map +
+    /// live_core_sdk_data.pull_data.options.qualities).
+    private func roomInfoFromReflow(roomID: String) async throws -> JSONValue {
+        let url = "https://webcast.amemv.com/webcast/room/reflow/info/?type_id=0&live_id=1&room_id=\(roomID)&sec_user_id=&version_code=99.99.99&app_id=6383"
+        guard let json = try? await http.getJSON(url, headers: await Self.requestHeaders()),
+              json["status_code"].intValue == 0,
+              !json["data"]["room"].isNull else {
+            throw LiveSiteError.roomNotFound(roomID)
+        }
+        let room = json["data"]["room"]
+        return .object([
+            "room": room,
+            "anchor": room["owner"],
+            "web_stream_url": room["stream_url"],
+        ])
+    }
+
+    /// Signed enter API — Pure Live's primary ByWebRid route
+    /// (douyin_site.dart:680-692, signed via buildRequestUrl = the
+    /// same a_bogus signing as the category API). Returns the
+    /// roomInfo-shaped object. From this VM the API answers HTTP
+    /// 200 with an EMPTY body — an egress-IP artifact, not a
+    /// signing bug (signing verified 2/2 in build 9) — so on this
+    /// VM it always falls through to the HTML route; on a China
+    /// IP it is the primary path. Kept because Pure Live proves
+    /// it works there.
+    private func roomInfoFromEnter(webRID: String) async throws -> JSONValue {
+        let params: [(String, String)] = [
+            ("app_name", "douyin_web"),
+            ("enter_from", "web_live"),
+            ("live_id", "1"),
+            ("web_rid", webRID),
+            ("is_need_double_stream", "false"),
+        ]
+        let url = DouyinURLSigning.signedURL(base: "https://live.douyin.com/webcast/room/web/enter/", params: params)
+        guard let json = try? await http.getJSON(url, headers: await Self.requestHeaders()),
+              !json["data"][0].isNull else {
+            throw LiveSiteError.roomNotFound(webRID)
+        }
+        let room = json["data"][0]
+        return .object([
+            "room": room,
+            "anchor": room["owner"],
+            "web_stream_url": room["stream_url"],
+        ])
     }
 
     /// Pick the hydrated roomInfo from the page's roomStore objects.
@@ -501,7 +619,7 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
             anchorAvatarURL: URL(string: anchor["avatar_thumb"]["url_list"][0].stringValue ?? ""),
             coverURL: nil,
             categoryName: nil,
-            viewerCount: Int(room["user_count_str"].stringValue ?? "") ?? 0,
+            viewerCount: Int(room["user_count_str"].stringValue ?? "") ?? room["user_count"].intValue ?? 0,
             isLive: room["status"].intValue == 2
         )
     }

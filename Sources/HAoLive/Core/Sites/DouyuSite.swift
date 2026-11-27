@@ -44,12 +44,16 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
     ]
 
     /// The websec encryption descriptor for one signing session.
+    /// expireAt is the descriptor's own expiry (unix seconds) —
+    /// Pure Live refuses to sign with a descriptor that dies
+    /// within 30 s (isEncryptionKeyUsable).
     struct Encryption {
         var key: String
         var randStr: String
         var encTime: Int
         var encData: String
         var isSpecial: Int
+        var expireAt: Int
     }
 
     // MARK: - Lists
@@ -209,16 +213,15 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
         throw lastError ?? LiveSiteError.invalidResponse
     }
 
-    /// The device id the signing binds to. One stable random id,
-    /// persisted — Pure Live keeps the same did across calls.
+    /// The device id the signing binds to. Pure Live's FIXED
+    /// default (douyu_utils.dart defaultDeviceId): the signing
+    /// and the play calls share one stable did, and the server
+    /// knows this one. A persisted random UUID used to be
+    /// generated here; the 2026-11-27 VM probe got error 0 from
+    /// getEncryption with the fixed did, and the play calls carry
+    /// the same did in their cookie.
     private static func deviceID() -> String {
-        let key = "douyu.deviceID"
-        if let saved = UserDefaults.standard.string(forKey: key), saved.count == 32 {
-            return saved
-        }
-        let did = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        UserDefaults.standard.set(did, forKey: key)
-        return did
+        "10000000000000000000000000001501"
     }
 
     private func encryption(did: String) async throws -> Encryption {
@@ -228,19 +231,27 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
     }
 
     /// Pure parser for a getEncryption response. Testable without the network.
+    /// Pure Live's isEncryptionKeyUsable (douyu_utils.dart:120-135):
+    /// expire_at must outlive the signing call by 30 s, enc_time
+    /// 1...16, key/rand_str/enc_data non-empty. A stale descriptor
+    /// used to be signed with anyway — the play call then failed
+    /// with no streams and no picture.
     static func encryption(fromJSON json: JSONValue) -> Encryption? {
         guard json["error"].intValue == 0 else { return nil }
         let data = json["data"]
         guard let key = data["key"].stringValue, !key.isEmpty,
               let randStr = data["rand_str"].stringValue, !randStr.isEmpty,
-              let encTime = data["enc_time"].intValue,
-              let encData = data["enc_data"].stringValue, !encData.isEmpty else { return nil }
+              let encTime = data["enc_time"].intValue, (1...16).contains(encTime),
+              let encData = data["enc_data"].stringValue, !encData.isEmpty,
+              let expireAt = data["expire_at"].intValue,
+              expireAt > Int(Date().timeIntervalSince1970) + 30 else { return nil }
         return Encryption(
             key: key,
             randStr: randStr,
             encTime: encTime,
             encData: encData,
-            isSpecial: data["is_special"].intValue ?? 0
+            isSpecial: data["is_special"].intValue ?? 0,
+            expireAt: expireAt
         )
     }
 
@@ -274,6 +285,8 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
             "iar": "0",
         ]
         let headers = [
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
             "Referer": "\(Self.webBase)/\(roomID)",
             "Origin": Self.webBase,
             "Cookie": "dy_did=\(did); acf_did=\(did)",
@@ -299,22 +312,37 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
 
     /// Pure parser for one getH5PlayV1 response. Prefers hls_url when
     /// the server offers it; otherwise builds the FLV URL from
-    /// rtmp_url + rtmp_live. Testable without the network.
+    /// rtmp_url + rtmp_live. Testable without the network. The
+    /// stream carries its lease: the `expire` query value is
+    /// RELATIVE seconds from issuance (Pure Live's
+    /// getPlayUrlInvalidAt), so the service can refresh before the
+    /// CDN closes the line mid-stream.
     static func stream(fromPlayResponse json: JSONValue, quality: String, line: String) -> PlayStream? {
         guard json["error"].intValue == 0 else { return nil }
         let data = json["data"]
         if let hls = data["hls_url"].stringValue, !hls.isEmpty, let url = URL(string: hls) {
-            return PlayStream(url: url, quality: quality, line: line)
+            return PlayStream(url: url, quality: quality, line: line, expiresAt: Self.expiresAt(fromURLString: hls))
         }
         guard var urlString = Self.playURL(fromPlayData: data) else { return nil }
         // Pure Live: 5-minute ws lines (expire=300&fcdn=ws) die
         // mid-stream; appending expire=0 makes the CDN issue its
         // default lifetime instead.
-        if urlString.contains("expire=300"), urlString.contains("fcdn=ws") {
+        let patched = urlString.contains("expire=300") && urlString.contains("fcdn=ws")
+        if patched {
             urlString += "&expire=0"
         }
         guard let url = URL(string: urlString) else { return nil }
-        return PlayStream(url: url, quality: quality, line: line)
+        return PlayStream(url: url, quality: quality, line: line, expiresAt: patched ? nil : Self.expiresAt(fromURLString: urlString))
+    }
+
+    /// Lease expiry for a signed URL: `expire` is relative seconds
+    /// from issuance (the moment this stream list is built).
+    /// Testable without the network.
+    static func expiresAt(fromURLString urlString: String) -> Date? {
+        guard let components = URLComponents(string: urlString),
+              let value = components.queryItems?.first(where: { $0.name == "expire" })?.value,
+              let seconds = Int(value), seconds > 0 else { return nil }
+        return Date(timeIntervalSinceNow: TimeInterval(seconds))
     }
 
     /// Pure parser for the V1 play data: rtmp_live is a complete signed

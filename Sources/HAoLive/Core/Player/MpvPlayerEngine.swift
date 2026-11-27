@@ -12,19 +12,22 @@
 // resolves the package on Bitrise (exact version pin); no
 // Package.resolved is committed yet.
 //
-// RENDERING: libmpv exposes no Metal render API — render.h defines
-// only MPV_RENDER_API_TYPE_OPENGL and a software renderer. OpenGL ES
-// is deprecated since iOS 12, has no headers in the iOS 26 SDK and
-// crashes on Apple Silicon simulators, so this engine uses the
-// SOFTWARE renderer (MPV_RENDER_API_TYPE_SW), the same fallback
-// media_kit forces on iOS simulators: frames are rendered into a
-// CPU buffer and displayed as a CGImage. It costs CPU (not GPU);
-// the OpenGL/EAGL path is the performance upgrade if the SDK
-// headers allow it on the build stack, not a correctness fix.
-// Since build 9 the SW path is FLV-only (HLS goes to the hardware
+// RENDERING: two paths, one engine. On device the GPU path is
+// used — MpvGLRenderer (media_kit's TextureHW, ported): mpv's
+// OpenGL render API draws into an FBO texture backed by a
+// CVPixelBuffer, which an AVSampleBufferDisplayLayer shows
+// zero-copy. libmpv exposes no Metal render API (render.h has
+// only MPV_RENDER_API_TYPE_OPENGL + the software renderer), and
+// OpenGL ES is what media_kit still ships on iOS. The SOFTWARE
+// renderer stays as the fallback: it is used on the simulator
+// (media_kit disables GL there — "an incompatibility with
+// OpenGL ES") and whenever EAGLContext creation fails. Since
+// build 9 the SW path is FLV-only (HLS goes to the hardware
 // player first), capped at 1280x720, and zero-copy: frames render
 // into a two-slot pool and the CGImage reads the slot directly
 // (FrameBufferPool), instead of a Data(bytes:) memcpy per frame.
+// The GL path renders at native video size up to 1920x1080 — the
+// GPU scales, the CPU never sees the pixels.
 //
 // OPTIONS: Pure Live's MediaKitLiveProperties table, translated:
 // protocol whitelist, 2 MB probe, 2 s analyze, 15 s network
@@ -81,6 +84,17 @@ import UIKit
     private var firstFrameReported = false
     private nonisolated(unsafe) var renderPending = false
     private nonisolated(unsafe) var renderSize = CGSize(width: 1280, height: 720)
+    /// Video size for the GL renderer (native size, capped
+    /// 1920x1080 — the GPU scales). Updated by the same property
+    /// observations as renderSize; the GL renderer dedupes.
+    private nonisolated(unsafe) var glVideoSize = CGSize.zero
+    /// The GPU renderer, when the device path is active. Nil on
+    /// the simulator and when EAGL is unavailable — the SW path
+    /// below then serves instead.
+    #if canImport(OpenGLES)
+    private nonisolated(unsafe) var glRenderer: MpvGLRenderer?
+    private var glVideoViewInstance: MpvGLVideoView?
+    #endif
     /// Two-slot frame pool (see FrameBufferPool): renderFrame renders
     /// into the idle slot and hands that slot's memory to the CGImage
     /// with no copy; the provider's release callback returns the slot.
@@ -94,7 +108,14 @@ import UIKit
     // even with a @MainActor init). The class is @MainActor now, so a
     // default would work — the init-body assignment stays as-is.
     private let videoViewInstance: MpvVideoView
-    var videoView: UIView { videoViewInstance }
+    /// The GL view when the GPU path is active; the service only
+    /// ever sees `videoView`, which picks the active one.
+    var videoView: UIView {
+        #if canImport(OpenGLES)
+        if let glView = glVideoViewInstance { return glView }
+        #endif
+        return videoViewInstance
+    }
 
     var isPlaying: Bool { opened && !paused }
 
@@ -123,9 +144,43 @@ import UIKit
             self.handle = nil
             return
         }
+        // GPU path first on device (media_kit's rule: the simulator
+        // never gets GL). When it cannot be built, fall through to
+        // the software renderer below.
+        #if canImport(OpenGLES) && !targetEnvironment(simulator)
+        if tryEnableGL(handle) {
+            observeVideoSize(handle)
+            startEventThread()
+            return
+        }
+        #endif
         createRenderContext(handle)
         startEventThread()
     }
+
+    /// Build the GPU renderer + its view. True when the GL path is
+    /// live; false leaves the engine to the SW path. Called only
+    /// from init (main actor).
+    #if canImport(OpenGLES) && !targetEnvironment(simulator)
+    private func tryEnableGL(_ handle: OpaquePointer) -> Bool {
+        let glView = MpvGLVideoView()
+        guard let renderer = MpvGLRenderer(handle: handle, displayLayer: glView.sampleLayer, onFirstFrame: { [weak self] in
+            Task { @MainActor in self?.reportGLFirstFrame() }
+        }) else { return false }
+        self.glVideoViewInstance = glView
+        self.glRenderer = renderer
+        return true
+    }
+
+    /// First GL frame: same ready signal the SW path reports from
+    /// its first rendered frame.
+    private func reportGLFirstFrame() {
+        guard !firstFrameReported else { return }
+        firstFrameReported = true
+        delegate?.engineDidRenderFirstFrame(self)
+        delegate?.engineDidBecomeReady(self)
+    }
+    #endif
 
     /// Tear the mpv instance down. The service calls this from stop()
     /// and drops the engine afterwards — a destroyed engine is never
@@ -225,10 +280,19 @@ import UIKit
         opened = false
         paused = false
         firstFrameReported = false
+        #if canImport(OpenGLES)
+        glVideoViewInstance?.flush()
+        #endif
         mpv_command_string(handle, "stop")
     }
 
     func setVideoFit(fill: Bool) {
+        #if canImport(OpenGLES)
+        if let glView = glVideoViewInstance {
+            glView.setFill(fill)
+            return
+        }
+        #endif
         videoViewInstance.setFill(fill)
     }
 
@@ -334,8 +398,15 @@ import UIKit
 
     /// Called on libmpv's render thread when a new frame is available.
     /// nonisolated: the C update callback (see createRenderContext)
-    /// and the event loop call this off the main actor.
+    /// and the event loop call this off the main actor. The GPU path
+    /// owns its own coalescing; the SW path uses renderPending.
     nonisolated private func renderUpdateRequested() {
+        #if canImport(OpenGLES)
+        if let gl = glRenderer {
+            gl.renderUpdateRequested()
+            return
+        }
+        #endif
         guard !renderPending else { return }
         renderPending = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -464,7 +535,15 @@ import UIKit
         // The thread owns the final teardown: render context first,
         // then the handle, then the frame buffer. Freeing the render
         // context unregisters the update callback, so the retained
-        // self it held is released here, after the free.
+        // self it held is released here, after the free. The GPU
+        // path's context lives in the renderer — tear it down
+        // instead of the (nil) SW one.
+        #if canImport(OpenGLES)
+        if let gl = glRenderer {
+            gl.teardown()
+            glRenderer = nil
+        }
+        #endif
         if let context = renderContext {
             mpv_render_context_free(context)
             renderContext = nil
@@ -515,14 +594,23 @@ import UIKit
         guard value > 0 else { return }
         // reply_userdata lives on mpv_event, not on mpv_event_property
         // (which only has name/format/data) — primary #22.
-        // Capped at 1280x720: the software renderer rasterises every
+        // SW cap 1280x720: the software renderer rasterises every
         // pixel on the CPU, and 1080p rooms were the build 8 lag
         // (HLS goes to the hardware player first now; this cap is for
-        // the FLV rooms that still need mpv).
+        // the FLV rooms that still need mpv). The GL path renders at
+        // native size up to 1920x1080 — the GPU scales.
         if event.reply_userdata == 1 {
             renderSize.width = CGFloat(min(value, 1280))
+            #if canImport(OpenGLES)
+            glVideoSize.width = CGFloat(min(value, 1920))
+            glRenderer?.resize(to: glVideoSize)
+            #endif
         } else if event.reply_userdata == 2 {
             renderSize.height = CGFloat(min(value, 720))
+            #if canImport(OpenGLES)
+            glVideoSize.height = CGFloat(min(value, 1080))
+            glRenderer?.resize(to: glVideoSize)
+            #endif
         }
     }
 }

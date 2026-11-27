@@ -8,12 +8,20 @@
 //   source-ready timeout (18 s, Pure Live's sourceReadyTimeout).
 // Engine order: per stream format, not pinned globally. HLS goes
 // to the system player first — AVPlayer is fully hardware
-// end-to-end (zero copies), while mpv's software renderer copies
-// every frame through the CPU (the build 8 lag). mpv stays first
-// for FLV / RTMP, which AVPlayer cannot play at all. The loser
-// still sweeps second, so a broken first engine falls through to
-// the other (chen 2026-11-27 19:53 decided to KEEP the system
-// player fallback ("留")).
+// end-to-end (zero copies). mpv stays first for FLV / RTMP, which
+// AVPlayer cannot play at all — and since build 10 mpv renders on
+// the GPU (MpvGLRenderer, media_kit's TextureHW) instead of
+// rasterising every frame on the CPU (the build 8/9 lag). The
+// loser still sweeps second, so a broken first engine falls
+// through to the other (chen 2026-11-27 19:53 decided to KEEP the
+// system player fallback ("留")).
+// Signed URLs have a lease: a Douyu FLV line carries
+// `expire=300` — the CDN closes it 5 minutes after issuance —
+// so the service refreshes the stream before the lease ends
+// (Pure Live's getPlayUrlRefreshAt: 45 s before expiry, or a
+// quarter of the lifetime for short leases), instead of letting
+// the picture freeze mid-stream. Streams without a known expiry
+// (patched ws lines, HLS) get no timer.
 // Before the next engine, sources are re-resolved through
 // sourceRefresh (Pure Live's onEngineFallbackSources: signed URLs
 // are single-use, so a fresh resolve is needed per engine).
@@ -65,6 +73,13 @@ final class LivePlayerService: ObservableObject {
     private var engineIndex = 0
     private var activeEngine: (any PlayerEngine)?
     private var watchdogTask: Task<Void, Never>?
+    /// Lease-refresh timer for the currently playing stream
+    /// (PlayStream.expiresAt). Fires refresh() before the signed
+    /// URL dies. Cancelled on every open/play/stop; (re)scheduled
+    /// only when an engine actually becomes ready, so a failed
+    /// candidate's lease never interrupts the stream that
+    /// replaced it.
+    private var leaseTask: Task<Void, Never>?
     private var lastErrorMessage: String?
     private var refreshedForEngine = false
     private var generation = 0
@@ -78,6 +93,7 @@ final class LivePlayerService: ObservableObject {
     func open(streams: [PlayStream], preferredQuality: String?, preferredLine: String?) {
         generation += 1
         cancelWatchdog()
+        cancelLeaseRefresh()
         destroyEngines()
         engines = []
         availableStreams = streams
@@ -102,6 +118,7 @@ final class LivePlayerService: ObservableObject {
     func play(stream: PlayStream) {
         generation += 1
         cancelWatchdog()
+        cancelLeaseRefresh()
         destroyEngines()
         engines = []
         triedStreamIDs = []
@@ -158,6 +175,7 @@ final class LivePlayerService: ObservableObject {
     func stop() {
         generation += 1
         cancelWatchdog()
+        cancelLeaseRefresh()
         activeEngine?.stop()
         destroyEngines()
         activeEngine = nil
@@ -278,6 +296,35 @@ final class LivePlayerService: ObservableObject {
         watchdogTask?.cancel()
         watchdogTask = nil
     }
+
+    // MARK: - Lease refresh
+
+    /// Arm the refresh for the playing stream's lease. Pure Live's
+    /// getPlayUrlRefreshAt: 45 s before expiry, or a quarter of
+    /// the lifetime for short leases. A stream with no expiry
+    /// gets no timer; an already-due lease refreshes at once
+    /// (the fresh URL carries a fresh lease).
+    private func scheduleLeaseRefresh(for stream: PlayStream) {
+        cancelLeaseRefresh()
+        guard let expiresAt = stream.expiresAt else { return }
+        let lifetime = expiresAt.timeIntervalSinceNow
+        guard lifetime > 0 else { return }
+        let lead = min(45, lifetime / 4)
+        let delay = lifetime - lead
+        let generation = generation
+        leaseTask = Task {
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+            }
+            guard generation == self.generation, !Task.isCancelled else { return }
+            self.refresh()
+        }
+    }
+
+    private func cancelLeaseRefresh() {
+        leaseTask?.cancel()
+        leaseTask = nil
+    }
 }
 
 // MARK: - PlayerEngineDelegate
@@ -288,6 +335,9 @@ extension LivePlayerService: PlayerEngineDelegate {
         cancelWatchdog()
         state = .playing
         engine.play()
+        if let stream = currentStream {
+            scheduleLeaseRefresh(for: stream)
+        }
     }
 
     func engine(_ engine: any PlayerEngine, didFailWith message: String) {

@@ -75,6 +75,8 @@
 		54B9F575B9DD40FCDB0F2B29 = {isa = PBXBuildFile; fileRef = 3F8C32CA2D7221E917E10319; };
 		6C6B0C0A2223BDD66A1010CB = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MpvPlayerEngine.swift; sourceTree = "<group>"; };
 		4120B705C126BA10B993CEF4 = {isa = PBXBuildFile; fileRef = 6C6B0C0A2223BDD66A1010CB; };
+		C22F04E2E73D88DB57DEEEDA = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MpvGLRenderer.swift; sourceTree = "<group>"; };
+		9C982BB63B87594EC8655429 = {isa = PBXBuildFile; fileRef = C22F04E2E73D88DB57DEEEDA; };
 		87C27D7D6E8F23741D6DD38A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesStore.swift; sourceTree = "<group>"; };
 		C72003B663B760C3E09BD7C5 = {isa = PBXBuildFile; fileRef = 87C27D7D6E8F23741D6DD38A; };
 		8BA8B8CD320A38089CEF53C9 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
@@ -187,6 +189,7 @@
 				6AF9ABBB69A4BFD1C552DF33,
 				3F8C32CA2D7221E917E10319,
 				6C6B0C0A2223BDD66A1010CB,
+				C22F04E2E73D88DB57DEEEDA,
 			);
 			name = Player;
 			path = Player;
@@ -381,6 +384,7 @@
 				3854E8BFEBA93E709E536B0E,
 				54B9F575B9DD40FCDB0F2B29,
 				4120B705C126BA10B993CEF4,
+				9C982BB63B87594EC8655429,
 				C72003B663B760C3E09BD7C5,
 				109763D21E817FE8E588F0D1,
 				80E96D5C9B612A450F3A94F4,

@@ -18,6 +18,15 @@ struct PlayStream: Identifiable, Hashable, Codable, Sendable {
     var quality: String
     var line: String
     var headers: [String: String] = [:]
+    /// When the CDN closes this signed URL (Douyu's `expire`
+    /// query value is relative seconds from issuance — Pure Live's
+    /// getPlayUrlInvalidAt). Nil when the URL carries no known
+    /// expiry. The service refreshes the stream before this time
+    /// instead of letting the picture freeze mid-stream. A `var`
+    /// with a default IS a memberwise-init parameter (a `let`
+    /// with a default would not be), so existing construction
+    /// sites compile unchanged.
+    var expiresAt: Date? = nil
 
     /// Container declared by the URL ("flv" / "hls" / ""), so the
     /// engine does not have to probe for it (Pure Live's
