@@ -28,12 +28,13 @@
 //   HLS playback itself is NOT verifiable from this VM: the CDN
 //   answers 403 to this egress IP (the anti-code is IP-bound).
 //   Needs a China-network device to confirm playback.
-// Danmaku: Huya's danmaku is a WebSocket speaking the TAF/JCE binary
-// protocol (WSRegisterGroupReq / WSPushMessage). That is a large
-// piece of work on its own and is NOT implemented in this leg —
-// danmakuStream returns the default empty stream and the room view
-// shows no live danmaku for Huya. Next step: implement the JCE
-// codec for those two structs against a live capture.
+// Danmaku: live TAF/JCE WebSocket channel (wss://cdnws.api.huya.com).
+// Room ids come from m.huya.com/{room} (lYyid, lChannelId,
+// lSubChannelId); register with WSUserInfo in a WebSocketCommand,
+// heartbeat is a bare UserHeartBeatReq every 30s, chat is
+// WSPushMessage uri 1400 → MessageNotice. Verified live from this
+// VM 2026-11-27: register answered "注册成功", 151 chat messages
+// in 91s from room 485503.
 
 import Foundation
 #if canImport(FoundationNetworking)
@@ -181,7 +182,13 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
         [] // no live channel yet; never show fake lines as live danmaku
     }
 
-    // danmakuStream: default empty stream (TAF channel not implemented).
+    func danmakuStream(roomID: String) -> AsyncStream<DanmakuItem> {
+#if !os(Linux)
+        return HuyaDanmaku.stream(roomID: roomID)
+#else
+        return AsyncStream { $0.finish() }
+#endif
+    }
 
     // MARK: - Page helpers
 

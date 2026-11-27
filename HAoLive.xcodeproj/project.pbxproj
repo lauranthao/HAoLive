@@ -35,6 +35,12 @@
 		9D3D032E6D77B1DCF0F5DD1F = {isa = PBXBuildFile; fileRef = 55E282B2F8695446F32CB391; };
 		59E774425EF54494C45A8078 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinDanmaku.swift; sourceTree = "<group>"; };
 		C079D200C65C0C889EC47FD3 = {isa = PBXBuildFile; fileRef = 59E774425EF54494C45A8078; };
+		F3B4C226B25753CB65844F87 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TarsCodec.swift; sourceTree = "<group>"; };
+		824EB3C2FD64E58D4B40935A = {isa = PBXBuildFile; fileRef = F3B4C226B25753CB65844F87; };
+		05EC80EAA4674B8360FE5CC6 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuyaDanmaku.swift; sourceTree = "<group>"; };
+		DAD0B7F207729977F3CC2C4B = {isa = PBXBuildFile; fileRef = 05EC80EAA4674B8360FE5CC6; };
+		2B8CA479931B9CB7C4B010D7 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KuaishouDanmaku.swift; sourceTree = "<group>"; };
+		7B4D74102E482B2DAAC9DEC7 = {isa = PBXBuildFile; fileRef = 2B8CA479931B9CB7C4B010D7; };
 		8B32DECCC6E68C3A67B8D455 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSite.swift; sourceTree = "<group>"; };
 		9FEDB5C389EEF0F11E675D43 = {isa = PBXBuildFile; fileRef = 8B32DECCC6E68C3A67B8D455; };
 		C24E42768343B00ACCACD44D = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomSearchMerger.swift; sourceTree = "<group>"; };
@@ -131,6 +137,9 @@
 				A19D8A7FDCE95EA2F6C5ECAC,
 				55E282B2F8695446F32CB391,
 				59E774425EF54494C45A8078,
+				F3B4C226B25753CB65844F87,
+				05EC80EAA4674B8360FE5CC6,
+				2B8CA479931B9CB7C4B010D7,
 			);
 			name = Danmaku;
 			path = Danmaku;
@@ -331,6 +340,9 @@
 				68078FA728BA312FFF2BB938,
 				9D3D032E6D77B1DCF0F5DD1F,
 				C079D200C65C0C889EC47FD3,
+				824EB3C2FD64E58D4B40935A,
+				DAD0B7F207729977F3CC2C4B,
+				7B4D74102E482B2DAAC9DEC7,
 				9FEDB5C389EEF0F11E675D43,
 				ED7B8B495587FBBF94DCE5B5,
 				E2354EA357A415FAF810018F,

@@ -1,7 +1,7 @@
 // BinaryCoding.swift
 // HAo Live — big-endian binary helpers (Bilibili danmaku frames) and a
-// minimal protobuf reader (Douyin/Kuaishou danmaku). Foundation-only,
-// so the Linux harness can exercise the decoders directly.
+// minimal protobuf reader/writer (Douyin/Kuaishou danmaku). Foundation-
+// only, so the Linux harness can exercise the decoders directly.
 
 import Foundation
 
@@ -22,6 +22,11 @@ extension Data {
         appendUInt32BE(UInt32(bitPattern: value))
     }
 
+    mutating func appendUInt64BE(_ value: UInt64) {
+        appendUInt32BE(UInt32((value >> 32) & 0xFFFFFFFF))
+        appendUInt32BE(UInt32(value & 0xFFFFFFFF))
+    }
+
     func uint16BE(at offset: Int) -> UInt16 {
         guard offset + 2 <= count else { return 0 }
         return (UInt16(self[offset]) << 8) | UInt16(self[offset + 1])
@@ -37,6 +42,18 @@ extension Data {
 
     func int32BE(at offset: Int) -> Int32 {
         Int32(bitPattern: uint32BE(at: offset))
+    }
+
+    func uint64BE(at offset: Int) -> UInt64 {
+        guard offset + 8 <= count else { return 0 }
+        return (UInt64(self[offset]) << 56)
+            | (UInt64(self[offset + 1]) << 48)
+            | (UInt64(self[offset + 2]) << 40)
+            | (UInt64(self[offset + 3]) << 32)
+            | (UInt64(self[offset + 4]) << 24)
+            | (UInt64(self[offset + 5]) << 16)
+            | (UInt64(self[offset + 6]) << 8)
+            | UInt64(self[offset + 7])
     }
 }
 
@@ -123,5 +140,39 @@ enum ProtoFieldValue {
     var uintValue: UInt64? {
         if case .varint(let value) = self { return value }
         return nil
+    }
+}
+
+/// Minimal protobuf wire writer: varints and length-delimited fields.
+/// Pairs with ProtoReader; field numbers are the caller's
+/// responsibility.
+struct ProtoWriter {
+    private(set) var data = Data()
+
+    mutating func appendVarint(_ value: UInt64) {
+        var value = value
+        while true {
+            if value < 0x80 {
+                data.append(UInt8(value))
+                return
+            }
+            data.append(UInt8(value & 0x7F) | 0x80)
+            value >>= 7
+        }
+    }
+
+    mutating func appendVarintField(number: Int, value: UInt64) {
+        appendVarint(UInt64(number << 3) | 0)
+        appendVarint(value)
+    }
+
+    mutating func appendBytesField(number: Int, value: Data) {
+        appendVarint(UInt64(number << 3) | 2)
+        appendVarint(UInt64(value.count))
+        data.append(value)
+    }
+
+    mutating func appendStringField(number: Int, value: String) {
+        appendBytesField(number: number, value: Data(value.utf8))
     }
 }

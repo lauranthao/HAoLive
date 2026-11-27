@@ -20,10 +20,14 @@
 //     hlsPlayUrl / playUrl string fields
 //   - liveCardList / category list item keys
 //   - any search endpoint (none verified; search returns [] for now)
-// Danmaku: the WS endpoint is known (liveroom.websocketUrls + token)
-// but the protobuf message layout is not verified — danmakuStream
-// returns the default empty stream. Next step: capture one live
-// session's frames and implement the SocketMessage decode.
+// Danmaku: live WebSocket feed (KuaiShouPack protobuf). Room info
+// comes from m.gifshow.com/fw/live/{userId} (wsFeedInfo:
+// liveStreamId, websocketUrls[0], token); enter with CS_ENTER_ROOM,
+// heartbeat CS_HEARTBEAT every 20s, chat is SC_FEED_PUSH (310) →
+// commentFeeds. Implemented from the wbt5/real-url reference
+// handler; NOT yet verified against Kuaishou's live server from
+// this VM (Kuaishou rate-limits this egress IP). Needs a domestic
+// real-device check.
 
 import Foundation
 #if canImport(FoundationNetworking)
@@ -133,7 +137,13 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
         [] // no live channel yet; never show fake lines as live danmaku
     }
 
-    // danmakuStream: default empty stream (protobuf layout unverified).
+    func danmakuStream(roomID: String) -> AsyncStream<DanmakuItem> {
+#if !os(Linux)
+        return KuaishouDanmaku.stream(roomID: roomID)
+#else
+        return AsyncStream { $0.finish() }
+#endif
+    }
 
     // MARK: - Page helpers
 
