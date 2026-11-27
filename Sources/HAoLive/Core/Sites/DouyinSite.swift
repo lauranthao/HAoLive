@@ -218,10 +218,6 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Danmaku
 
-    func sampleDanmaku(roomID: String) async -> [DanmakuItem] {
-        [] // real channel below; never show fake lines as live danmaku
-    }
-
     func danmakuStream(roomID: String) -> AsyncStream<DanmakuItem> {
         AsyncStream { continuation in
             let task = Task {

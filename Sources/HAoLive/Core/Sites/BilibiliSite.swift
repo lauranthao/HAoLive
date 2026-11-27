@@ -63,10 +63,19 @@ final class BilibiliSite: LiveSite, @unchecked Sendable {
         try await roomList(parentAreaID: 0, areaID: 0)
     }
 
+    func recommendRooms(page: Int) async throws -> [LiveRoom] {
+        try await roomList(parentAreaID: 0, areaID: 0, page: page)
+    }
+
     func categoryRooms(_ category: LiveCategory) async throws -> [LiveRoom] {
         // Category ids are "bili-{parent area id}".
         let parentID = Int(category.id.dropFirst("bili-".count)) ?? 0
         return try await roomList(parentAreaID: parentID, areaID: 0)
+    }
+
+    func categoryRooms(_ category: LiveCategory, page: Int) async throws -> [LiveRoom] {
+        let parentID = Int(category.id.dropFirst("bili-".count)) ?? 0
+        return try await roomList(parentAreaID: parentID, areaID: 0, page: page)
     }
 
     private func roomList(parentAreaID: Int, areaID: Int, page: Int = 1) async throws -> [LiveRoom] {
@@ -79,8 +88,12 @@ final class BilibiliSite: LiveSite, @unchecked Sendable {
     // MARK: - Search
 
     func searchRooms(keyword: String) async throws -> [LiveRoom] {
+        try await searchRooms(keyword: keyword, page: 1)
+    }
+
+    func searchRooms(keyword: String, page: Int) async throws -> [LiveRoom] {
         let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
-        let url = "https://api.bilibili.com/x/web-interface/search/type?search_type=live_room&keyword=\(encoded)&page=1&page_size=20"
+        let url = "https://api.bilibili.com/x/web-interface/search/type?search_type=live_room&keyword=\(encoded)&page=\(page)&page_size=20"
         let json = try await http.getJSON(url, headers: ["Referer": Self.searchReferer])
         guard json["code"].intValue == 0 else { throw LiveSiteError.invalidResponse }
         return json["data"]["result"].arrayValue.map(Self.room(fromSearchRoomItem:))
@@ -104,8 +117,12 @@ final class BilibiliSite: LiveSite, @unchecked Sendable {
     }
 
     func searchAnchors(keyword: String) async throws -> [LiveRoom] {
+        try await searchAnchors(keyword: keyword, page: 1)
+    }
+
+    func searchAnchors(keyword: String, page: Int) async throws -> [LiveRoom] {
         let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
-        let url = "https://api.bilibili.com/x/web-interface/search/type?search_type=live_user&keyword=\(encoded)&page=1&page_size=20"
+        let url = "https://api.bilibili.com/x/web-interface/search/type?search_type=live_user&keyword=\(encoded)&page=\(page)&page_size=20"
         let json = try await http.getJSON(url, headers: ["Referer": Self.searchReferer])
         guard json["code"].intValue == 0 else { throw LiveSiteError.invalidResponse }
         return json["data"]["result"].arrayValue.compactMap(Self.room(fromSearchUserItem:))
@@ -264,10 +281,6 @@ final class BilibiliSite: LiveSite, @unchecked Sendable {
     }
 
     // MARK: - Danmaku
-
-    func sampleDanmaku(roomID: String) async -> [DanmakuItem] {
-        [] // real channel below; never show fake lines as live danmaku
-    }
 
     func danmakuStream(roomID: String) -> AsyncStream<DanmakuItem> {
         AsyncStream { continuation in

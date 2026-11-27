@@ -47,8 +47,13 @@ protocol PlayerEngine: AnyObject {
 }
 
 /// Engine -> service callbacks. All calls arrive on the main actor
-/// (engines hop to the main queue before calling).
-protocol PlayerEngineDelegate: AnyObject {
+/// (engines hop to it before calling). The protocol is @MainActor so
+/// the @MainActor LivePlayerService can conform — a nonisolated
+/// protocol cannot be witnessed by main-actor-isolated code
+/// (primary #19: "conformance crosses into main actor-isolated
+/// code"). Engines must therefore call these only from a @MainActor
+/// context (Task { @MainActor in } / @MainActor methods).
+@MainActor protocol PlayerEngineDelegate: AnyObject {
     /// The engine is showing a picture. This is the sweep's success
     /// signal — the service reports .playing only after this.
     func engineDidBecomeReady(_ engine: any PlayerEngine)

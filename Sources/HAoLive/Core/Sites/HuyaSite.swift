@@ -66,7 +66,7 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
         data.arrayValue.compactMap { item in
             guard let id = item["gid"].stringValue,
                   let name = item["gameFullName"].stringValue, !name.isEmpty else { return nil }
-            return LiveCategory(id: "huya-\(id)", platform: .huya, name: name, iconName: nil)
+            return LiveCategory(id: "huya-\(id)", platform: .huya, name: name, iconName: nil, iconURL: URL(string: item["imgUrl"].stringValue ?? ""))
         }
     }
 
@@ -74,9 +74,18 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
         try await liveList(gameID: 0)
     }
 
+    func recommendRooms(page: Int) async throws -> [LiveRoom] {
+        try await liveList(gameID: 0, page: page)
+    }
+
     func categoryRooms(_ category: LiveCategory) async throws -> [LiveRoom] {
         let gameID = Int(category.id.dropFirst("huya-".count)) ?? 0
         return try await liveList(gameID: gameID)
+    }
+
+    func categoryRooms(_ category: LiveCategory, page: Int) async throws -> [LiveRoom] {
+        let gameID = Int(category.id.dropFirst("huya-".count)) ?? 0
+        return try await liveList(gameID: gameID, page: page)
     }
 
     private func liveList(gameID: Int, page: Int = 1) async throws -> [LiveRoom] {
@@ -89,18 +98,26 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
     // MARK: - Search
 
     func searchRooms(keyword: String) async throws -> [LiveRoom] {
-        try await search(keyword: keyword)
+        try await search(keyword: keyword, page: 1)
     }
 
     func searchAnchors(keyword: String) async throws -> [LiveRoom] {
-        try await search(keyword: keyword)
+        try await search(keyword: keyword, page: 1)
+    }
+
+    func searchRooms(keyword: String, page: Int) async throws -> [LiveRoom] {
+        try await search(keyword: keyword, page: page)
+    }
+
+    func searchAnchors(keyword: String, page: Int) async throws -> [LiveRoom] {
+        try await search(keyword: keyword, page: page)
     }
 
     /// Huya's search API. Unverified from this VM (the response shape
     /// is parsed defensively); needs a device to confirm.
-    private func search(keyword: String) async throws -> [LiveRoom] {
+    private func search(keyword: String, page: Int = 1) async throws -> [LiveRoom] {
         let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
-        let url = "https://search.huya.com/api/search?huyaSearchType=live&search=\(encoded)&page=1"
+        let url = "https://search.huya.com/api/search?huyaSearchType=live&search=\(encoded)&page=\(page)"
         let json = try await http.getJSON(url, headers: ["Referer": "\(Self.webBase)/"])
         let items: [JSONValue]
         if !json["data"].arrayValue.isEmpty {
@@ -308,8 +325,11 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
     /// (no login). Cached for the process; on failure a stable
     /// process-local fallback UID is used (Pure Live's
     /// _loadAnonymousViewerIdentity / _createFallbackViewerUid).
-    private static var cachedViewerUID: Int?
-    private static var fallbackViewerUID: Int?
+    /// Shared mutable statics: written idempotently (same value on
+    /// repeat). Swift 6 needs the explicit opt-in (same pattern as
+    /// OrientationLock.shared / CoverImageCache.shared, build 5).
+    nonisolated(unsafe) private static var cachedViewerUID: Int?
+    nonisolated(unsafe) private static var fallbackViewerUID: Int?
 
     static func viewerUID() async -> Int {
         if let cached = cachedViewerUID { return cached }
@@ -469,10 +489,6 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
     }
 
     // MARK: - Danmaku
-
-    func sampleDanmaku(roomID: String) async -> [DanmakuItem] {
-        [] // no live channel yet; never show fake lines as live danmaku
-    }
 
     func danmakuStream(roomID: String) -> AsyncStream<DanmakuItem> {
 #if !os(Linux)

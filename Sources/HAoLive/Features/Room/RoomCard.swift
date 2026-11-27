@@ -35,6 +35,14 @@ final class CoverImageCache {
         return image
     }
 
+    /// Clear the in-memory cover cache and the shared URL cache.
+    /// Favorites and history are untouched (they are user data,
+    /// not cache).
+    func clear() {
+        cache.removeAllObjects()
+        URLCache.shared.removeAllCachedResponses()
+    }
+
     private static func referer(for url: URL) -> String {
         guard let host = url.host else { return "https://live.bilibili.com/" }
         if host.contains("hdslb.com") || host.contains("bilibili.com") { return "https://live.bilibili.com/" }
@@ -85,19 +93,30 @@ struct RoomCard: View {
                 CoverImage(url: room.coverURL)
                     .aspectRatio(16.0 / 9.0, contentMode: .fit)
                 HStack {
-                    Text("LIVE")
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(HaoLiveDesign.liveRed, in: Capsule())
-                        .foregroundStyle(.white)
+                    if room.isLive {
+                        Text("LIVE")
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(HaoLiveDesign.liveRed, in: Capsule())
+                            .foregroundStyle(.white)
+                    } else {
+                        Text("离线")
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .foregroundStyle(.white.opacity(0.9))
+                    }
                     Spacer()
-                    Text(room.viewerCountText)
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(.black.opacity(0.55), in: Capsule())
-                        .foregroundStyle(.white)
+                    if room.isLive, room.viewerCount > 0 {
+                        Text(room.viewerCountText)
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .foregroundStyle(.white)
+                    }
                 }
                 .padding(8)
             }
@@ -105,9 +124,11 @@ struct RoomCard: View {
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(1)
             HStack(spacing: 6) {
+                avatarView
                 Text(room.anchorName)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Spacer()
                 Text(room.platform.shortName)
                     .font(.caption2.bold())
@@ -115,6 +136,27 @@ struct RoomCard: View {
                     .padding(.vertical, 2)
                     .background(Color(hex: room.platform.colorHex).opacity(0.15), in: Capsule())
                     .foregroundStyle(Color(hex: room.platform.colorHex))
+            }
+        }
+    }
+
+    /// Host avatar when the platform provides one; a first-letter
+    /// disc otherwise.
+    private var avatarView: some View {
+        Group {
+            if let avatarURL = room.anchorAvatarURL {
+                AsyncImage(url: avatarURL) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    Color.secondary.opacity(0.3)
+                }
+                .frame(width: 18, height: 18)
+                .clipShape(Circle())
+            } else {
+                Circle()
+                    .fill(Color.secondary.opacity(0.3))
+                    .frame(width: 18, height: 18)
+                    .overlay(Text(String(room.anchorName.prefix(1))).font(.system(size: 9)))
             }
         }
     }

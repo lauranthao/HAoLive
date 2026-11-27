@@ -82,11 +82,4 @@ class StubLiveSite: LiveSite, @unchecked Sendable {
         // real adapter. Never present a stub URL as playable.
         []
     }
-
-    func sampleDanmaku(roomID: String) async -> [DanmakuItem] {
-        let lines = ["主播好", "来了来了", "这波操作可以", "前排", "哈哈哈", "666", "关注了", "下播了吗", "音质不错", "弹幕护体"]
-        return lines.enumerated().map { index, text in
-            DanmakuItem(roomID: roomID, user: "观众\(index + 1)", text: text)
-        }
-    }
 }

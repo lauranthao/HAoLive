@@ -65,19 +65,31 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
         data.arrayValue.compactMap { item in
             guard let id = item["cate_id"].stringValue,
                   let name = item["game_name"].stringValue, !name.isEmpty else { return nil }
-            return LiveCategory(id: "douyu-\(id)", platform: .douyu, name: name, iconName: nil)
+            return LiveCategory(id: "douyu-\(id)", platform: .douyu, name: name, iconName: nil, iconURL: URL(string: item["game_icon"].stringValue ?? ""))
         }
     }
 
     func recommendRooms() async throws -> [LiveRoom] {
-        let json = try await http.getJSON("\(Self.openBase)/live?limit=30")
+        try await recommendRooms(page: 1)
+    }
+
+    func recommendRooms(page: Int) async throws -> [LiveRoom] {
+        // Offset paging verified live: offset=30 returns a different
+        // page than offset=0 (2026-11-27).
+        let offset = max(0, page - 1) * 30
+        let json = try await http.getJSON("\(Self.openBase)/live?offset=\(offset)&limit=30")
         guard json["error"].intValue == 0 else { throw LiveSiteError.invalidResponse }
         return json["data"].arrayValue.map(Self.room(fromListItem:))
     }
 
     func categoryRooms(_ category: LiveCategory) async throws -> [LiveRoom] {
+        try await categoryRooms(category, page: 1)
+    }
+
+    func categoryRooms(_ category: LiveCategory, page: Int) async throws -> [LiveRoom] {
         let cateID = category.id.dropFirst("douyu-".count)
-        let json = try await http.getJSON("\(Self.openBase)/live/\(cateID)?offset=0&limit=30")
+        let offset = max(0, page - 1) * 30
+        let json = try await http.getJSON("\(Self.openBase)/live/\(cateID)?offset=\(offset)&limit=30")
         guard json["error"].intValue == 0 else { throw LiveSiteError.invalidResponse }
         return json["data"].arrayValue.map(Self.room(fromListItem:))
     }
@@ -330,10 +342,6 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
     }
 
     // MARK: - Danmaku
-
-    func sampleDanmaku(roomID: String) async -> [DanmakuItem] {
-        [] // real channel below; never show fake lines as live danmaku
-    }
 
     func danmakuStream(roomID: String) -> AsyncStream<DanmakuItem> {
         #if canImport(Network)

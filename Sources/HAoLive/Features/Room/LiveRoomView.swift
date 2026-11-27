@@ -47,6 +47,21 @@ struct LiveRoomView: View {
     @State private var loadError: String?
     @State private var danmakuTask: Task<Void, Never>?
 
+    /// Room as re-fetched from the platform (title / host / viewers /
+    /// live status); the list copy is the fallback when it fails.
+    @State private var detailRoom: LiveRoom?
+
+    /// The room as shown: detail when available, else the list copy.
+    private var displayRoom: LiveRoom { detailRoom ?? room }
+
+    // Sleep timer (Pure Live's room timer: pauses on fire, never
+    // closes the page).
+    @State private var showingSleepTimer = false
+    @State private var sleepMinutes: Int?
+    @State private var sleepTask: Task<Void, Never>?
+    @State private var showSleepDone = false
+    @State private var composerText = ""
+
     // Player chrome state (Pure Live's VideoController).
     @State private var showControls = true
     @State private var locked = false
@@ -67,8 +82,10 @@ struct LiveRoomView: View {
             headerRow
             playerArea
             resolutionsRow
+            actionRow
             Divider()
             danmakuPanel
+            composerRow
         }
         .background(SystemVolumeView())
         .toolbar(.hidden, for: .navigationBar)
@@ -80,14 +97,33 @@ struct LiveRoomView: View {
         .sheet(isPresented: $showingDanmakuSettings) {
             DanmakuSettingsSheet(settingsStore: settingsStore)
         }
+        .sheet(isPresented: $showingSleepTimer) {
+            SleepTimerSheet(
+                activeMinutes: sleepMinutes,
+                onSet: { startSleepTimer(minutes: $0) },
+                onCancel: { cancelSleepTimer() }
+            )
+        }
+        .alert("睡眠定时已到", isPresented: $showSleepDone) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text("已暂停播放")
+        }
         .fullScreenCover(isPresented: $isFullscreen) {
             FullscreenPlayerView(
                 playerService: playerService,
-                room: room,
+                room: displayRoom,
                 danmakuItems: visibleDanmaku,
                 danmakuEnabled: settingsStore.danmakuEnabled,
                 danmakuFontSize: settingsStore.danmakuFontSize,
                 danmakuOpacity: settingsStore.danmakuOpacity,
+                danmakuSpeed: settingsStore.danmakuSpeed,
+                danmakuArea: settingsStore.danmakuArea,
+                danmakuFontWeight: settingsStore.danmakuFontWeight,
+                danmakuLetterSpacing: settingsStore.danmakuLetterSpacing,
+                danmakuStrokeEnabled: settingsStore.danmakuStrokeEnabled,
+                danmakuStrokeWidth: settingsStore.danmakuStrokeWidth,
+                danmakuMaxVisibleCount: settingsStore.danmakuMaxVisibleCount,
                 streams: streams,
                 isFavorite: favoritesStore.isFavorite(room),
                 onToggleFavorite: { favoritesStore.toggle(room) },
@@ -104,9 +140,70 @@ struct LiveRoomView: View {
             volumeHideTask?.cancel()
             danmakuTask?.cancel()
             danmakuTask = nil
+            sleepTask?.cancel()
+            sleepTask = nil
             playerService.stop()
             UIScreen.main.brightness = brightnessAtEntry
         }
+    }
+
+    // MARK: - Action row (share / browser / sleep timer / copy link)
+
+    private var actionRow: some View {
+        HStack(spacing: 16) {
+            if let url = roomWebURL {
+                ShareLink(item: url) {
+                    Label("分享", systemImage: "square.and.arrow.up")
+                }
+                Button {
+                    UIApplication.shared.open(url)
+                } label: {
+                    Label("浏览器打开", systemImage: "safari")
+                }
+                Button {
+                    if let stream = playerService.currentStream {
+                        UIPasteboard.general.string = stream.url.absoluteString
+                    }
+                } label: {
+                    Label("复制播放地址", systemImage: "link")
+                }
+                .disabled(playerService.currentStream == nil)
+            }
+            Spacer()
+            Button {
+                showingSleepTimer = true
+            } label: {
+                Label(
+                    sleepMinutes.map { "睡眠 \($0) 分钟" } ?? "睡眠定时",
+                    systemImage: sleepMinutes == nil ? "moon.zzz" : "moon.zzz.fill"
+                )
+            }
+        }
+        .font(.subheadline)
+        .padding(.horizontal, HaoLiveDesign.pagePadding + 4)
+        .padding(.vertical, 8)
+    }
+
+    /// Local danmaku composer (inline): typed messages show locally
+    /// in the overlay and the list, like Pure Live's local interaction.
+    private var composerRow: some View {
+        HStack(spacing: 8) {
+            TextField("发一条弹幕…", text: $composerText)
+                .textFieldStyle(.roundedBorder)
+                .font(.subheadline)
+            Button("发送") {
+                let text = composerText.trimmingCharacters(in: .whitespaces)
+                guard !text.isEmpty else { return }
+                appendDanmaku(localItem(text: text))
+                composerText = ""
+            }
+            .font(.subheadline.bold())
+            .foregroundStyle(HaoLiveDesign.liveRed)
+            .disabled(composerText.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+        .padding(.horizontal, HaoLiveDesign.pagePadding)
+        .padding(.vertical, 8)
+        .background(Color(.secondarySystemBackground))
     }
 
     // MARK: - Header (Pure Live's LivePlayHeader)
@@ -118,7 +215,7 @@ struct LiveRoomView: View {
                     .font(.headline)
                     .foregroundStyle(.primary)
             }
-            if let avatarURL = room.anchorAvatarURL {
+            if let avatarURL = displayRoom.anchorAvatarURL {
                 AsyncImage(url: avatarURL) { image in
                     image.resizable().scaledToFill()
                 } placeholder: {
@@ -130,13 +227,13 @@ struct LiveRoomView: View {
                 Circle()
                     .fill(Color.secondary.opacity(0.3))
                     .frame(width: 32, height: 32)
-                    .overlay(Text(String(room.anchorName.prefix(1))).font(.caption))
+                    .overlay(Text(String(displayRoom.anchorName.prefix(1))).font(.caption))
             }
             VStack(alignment: .leading, spacing: 1) {
-                Text(room.anchorName)
+                Text(displayRoom.anchorName)
                     .font(.subheadline.bold())
                     .lineLimit(1)
-                Text("\(room.platform.displayName)\(room.categoryName.map { " / \($0)" } ?? "")")
+                Text("\(displayRoom.platform.displayName)\(displayRoom.categoryName.map { " / \($0)" } ?? "")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -153,6 +250,9 @@ struct LiveRoomView: View {
                     Button("打开直播间") { UIApplication.shared.open(url) }
                     ShareLink(item: url, label: { Label("分享", systemImage: "square.and.arrow.up") })
                     Button("复制直播间链接") { UIPasteboard.general.string = url.absoluteString }
+                }
+                if let stream = playerService.currentStream {
+                    Button("复制播放地址") { UIPasteboard.general.string = stream.url.absoluteString }
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -173,9 +273,16 @@ struct LiveRoomView: View {
                 .background(.black)
             if settingsStore.danmakuEnabled {
                 DanmakuOverlayView(
-                    items: Array(visibleDanmaku.suffix(8)),
+                    items: visibleDanmaku,
                     fontSize: settingsStore.danmakuFontSize,
-                    opacity: settingsStore.danmakuOpacity
+                    opacity: settingsStore.danmakuOpacity,
+                    speed: settingsStore.danmakuSpeed,
+                    area: settingsStore.danmakuArea,
+                    fontWeight: settingsStore.danmakuFontWeight,
+                    letterSpacing: settingsStore.danmakuLetterSpacing,
+                    strokeEnabled: settingsStore.danmakuStrokeEnabled,
+                    strokeWidth: settingsStore.danmakuStrokeWidth,
+                    maxVisibleCount: settingsStore.danmakuMaxVisibleCount
                 )
             }
             // Placeholders (Pure Live's livePlayPlaceholderFor):
@@ -212,8 +319,8 @@ struct LiveRoomView: View {
             if showControls && !locked {
                 PlayerChromeView(
                     service: playerService,
-                    title: room.title,
-                    subtitle: "\(room.anchorName) · \(room.platform.displayName)",
+                    title: displayRoom.title,
+                    subtitle: "\(displayRoom.anchorName) · \(displayRoom.platform.displayName)",
                     isFullscreen: false,
                     isFavorite: favoritesStore.isFavorite(room),
                     danmakuEnabled: settingsStore.danmakuEnabled,
@@ -276,7 +383,7 @@ struct LiveRoomView: View {
 
     private var resolutionsRow: some View {
         HStack {
-            Label(room.viewerCountText, systemImage: "eye.fill")
+            Label(displayRoom.viewerCountText, systemImage: "eye.fill")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -347,6 +454,14 @@ struct LiveRoomView: View {
                                         .font(.subheadline)
                                 }
                                 .id(item.id)
+                                .contextMenu {
+                                    if item.user != "我" && !settingsStore.blockedUsers.contains(item.user) {
+                                        Button("屏蔽该用户", role: .destructive) {
+                                            settingsStore.blockedUsers.append(item.user)
+                                            danmakuEngine = makeDanmakuEngine()
+                                        }
+                                    }
+                                }
                             }
                         }
                         .padding(.horizontal, HaoLiveDesign.pagePadding)
@@ -363,15 +478,8 @@ struct LiveRoomView: View {
     }
 
     private var danmakuSettingsTab: some View {
-        Form {
-            Toggle("显示弹幕", isOn: $settingsStore.danmakuEnabled)
-            Stepper("字体大小：\(Int(settingsStore.danmakuFontSize))", value: $settingsStore.danmakuFontSize, in: 12...24, step: 1)
-            HStack {
-                Text("不透明度")
-                Slider(value: $settingsStore.danmakuOpacity, in: 0.3...1.0)
-            }
-        }
-        .scrollContentBackground(.hidden)
+        DanmakuSettingsForm(settingsStore: settingsStore)
+            .scrollContentBackground(.hidden)
     }
 
     private var blockListTab: some View {
@@ -383,27 +491,42 @@ struct LiveRoomView: View {
                     let keyword = newKeyword.trimmingCharacters(in: .whitespaces)
                     guard !keyword.isEmpty else { return }
                     settingsStore.blockedKeywords.append(keyword)
-                    danmakuEngine = DanmakuEngine(blockedKeywords: settingsStore.blockedKeywords, blockedUsers: [])
+                    danmakuEngine = makeDanmakuEngine()
                     newKeyword = ""
                 }
                 .disabled(newKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding(.horizontal, HaoLiveDesign.pagePadding)
             .padding(.vertical, 8)
-            if settingsStore.blockedKeywords.isEmpty {
-                ContentUnavailableView("无屏蔽关键词", systemImage: "nosign", description: Text("被屏蔽关键词的弹幕不会显示"))
-            } else {
-                List {
-                    ForEach(settingsStore.blockedKeywords, id: \.self) { keyword in
-                        Text(keyword)
-                    }
-                    .onDelete { indexSet in
-                        settingsStore.blockedKeywords.remove(atOffsets: indexSet)
-                        danmakuEngine = DanmakuEngine(blockedKeywords: settingsStore.blockedKeywords, blockedUsers: [])
+            List {
+                Section("屏蔽关键词") {
+                    if settingsStore.blockedKeywords.isEmpty {
+                        Text("无屏蔽关键词").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(settingsStore.blockedKeywords, id: \.self) { keyword in
+                            Text(keyword)
+                        }
+                        .onDelete { indexSet in
+                            settingsStore.blockedKeywords.remove(atOffsets: indexSet)
+                            danmakuEngine = makeDanmakuEngine()
+                        }
                     }
                 }
-                .listStyle(.plain)
+                Section("屏蔽用户") {
+                    if settingsStore.blockedUsers.isEmpty {
+                        Text("无屏蔽用户").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(settingsStore.blockedUsers, id: \.self) { user in
+                            Text(user)
+                        }
+                        .onDelete { indexSet in
+                            settingsStore.blockedUsers.remove(atOffsets: indexSet)
+                            danmakuEngine = makeDanmakuEngine()
+                        }
+                    }
+                }
             }
+            .listStyle(.plain)
         }
     }
 
@@ -510,18 +633,33 @@ struct LiveRoomView: View {
         DanmakuItem(roomID: room.roomID, user: "我", text: text)
     }
 
+    /// The engine for this room: blocklists and limits from Settings.
+    private func makeDanmakuEngine() -> DanmakuEngine {
+        DanmakuEngine(
+            blockedKeywords: settingsStore.blockedKeywords,
+            blockedUsers: Set(settingsStore.blockedUsers),
+            maxOnScreen: settingsStore.danmakuMaxVisibleCount,
+            collapseRepeated: settingsStore.danmakuCollapseRepeated
+        )
+    }
+
     private func enterRoom() async {
         historyStore.record(room)
         brightnessAtEntry = UIScreen.main.brightness
         danmakuTask?.cancel()
         danmakuTask = nil
-        danmakuEngine = DanmakuEngine(
-            blockedKeywords: settingsStore.blockedKeywords,
-            blockedUsers: []
-        )
+        danmakuEngine = makeDanmakuEngine()
         guard let site = SiteRegistry.site(for: room.platform) else {
             loadError = "该平台暂未接入"
             return
+        }
+        // Room detail in parallel with the stream fetch: title /
+        // host / viewers / live status as the platform reports
+        // them now. The list copy stays if the fetch fails.
+        Task {
+            if let detail = try? await site.roomDetail(roomID: room.roomID) {
+                detailRoom = detail
+            }
         }
         // Fresh signed URLs per engine in the sweep (Pure Live's
         // onEngineFallbackSources).
@@ -543,29 +681,13 @@ struct LiveRoomView: View {
         startDanmakuLoop(site: site)
     }
 
-    /// Feeds live danmaku into the overlay and the list tab. Prefers
-    /// the platform's live channel; when the site has none (stubs, or
-    /// a channel not implemented yet) it falls back to cycling sample
-    /// lines. The task is cancelled when the room closes.
+    /// Feeds live danmaku into the overlay and the list tab. When
+    /// the platform's channel closes, danmaku simply stops — no
+    /// canned lines are ever shown as if they were live chat.
     private func startDanmakuLoop(site: any LiveSite) {
         danmakuTask = Task { @MainActor in
-            var gotLive = false
             for await item in site.danmakuStream(roomID: room.roomID) {
-                gotLive = true
                 guard settingsStore.danmakuEnabled else { continue }
-                if danmakuEngine.accept(item) {
-                    appendDanmaku(item)
-                }
-            }
-            guard !gotLive else { return }
-            let samples = await site.sampleDanmaku(roomID: room.roomID)
-            guard !samples.isEmpty else { return }
-            var index = 0
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1.5))
-                guard settingsStore.danmakuEnabled else { continue }
-                let item = samples[index % samples.count]
-                index += 1
                 if danmakuEngine.accept(item) {
                     appendDanmaku(item)
                 }
@@ -580,6 +702,28 @@ struct LiveRoomView: View {
                 visibleDanmaku.removeFirst(visibleDanmaku.count - 200)
             }
         }
+    }
+
+    // MARK: - Sleep timer (Pure Live's room timer)
+
+    /// Starts a countdown; on fire it pauses the player and shows a
+    /// notice — it never closes the page.
+    private func startSleepTimer(minutes: Int) {
+        cancelSleepTimer()
+        sleepMinutes = minutes
+        sleepTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(Double(minutes) * 60))
+            guard !Task.isCancelled else { return }
+            sleepMinutes = nil
+            playerService.pause()
+            showSleepDone = true
+        }
+    }
+
+    private func cancelSleepTimer() {
+        sleepTask?.cancel()
+        sleepTask = nil
+        sleepMinutes = nil
     }
 }
 
@@ -630,19 +774,145 @@ struct DanmakuSettingsSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
+            DanmakuSettingsForm(settingsStore: settingsStore)
+                .navigationTitle("弹幕设置")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成") { dismiss() }
+                    }
+                }
+        }
+    }
+}
+
+/// The full danmaku settings set (Pure Live's
+/// DanmakuSettingsController, practical subset): speed, area,
+/// max visible count, collapse-repeated, font size / weight /
+/// letter spacing, opacity, stroke. Used by the room tab and the
+/// fullscreen sheet alike.
+struct DanmakuSettingsForm: View {
+    @ObservedObject var settingsStore: SettingsStore
+
+    var body: some View {
+        Form {
+            Section("显示") {
                 Toggle("显示弹幕", isOn: $settingsStore.danmakuEnabled)
-                Stepper("字体大小：\(Int(settingsStore.danmakuFontSize))", value: $settingsStore.danmakuFontSize, in: 12...24, step: 1)
+                HStack {
+                    Text("滚动速度")
+                    Slider(value: $settingsStore.danmakuSpeed, in: 20...400, step: 10)
+                    Text("\(Int(settingsStore.danmakuSpeed))")
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 34, alignment: .trailing)
+                }
+                HStack {
+                    Text("显示区域")
+                    Slider(value: $settingsStore.danmakuArea, in: 0.25...1.0, step: 0.05)
+                    Text("\(Int(settingsStore.danmakuArea * 100))%")
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 34, alignment: .trailing)
+                }
+                Stepper("同时显示：\(settingsStore.danmakuMaxVisibleCount) 条", value: $settingsStore.danmakuMaxVisibleCount, in: 10...120, step: 2)
+                Toggle("合并重复弹幕", isOn: $settingsStore.danmakuCollapseRepeated)
+            }
+            Section("字体") {
+                Stepper("字体大小：\(Int(settingsStore.danmakuFontSize))", value: $settingsStore.danmakuFontSize, in: 10...30, step: 1)
+                Picker("字重", selection: $settingsStore.danmakuFontWeight) {
+                    Text("细").tag(300)
+                    Text("常规").tag(500)
+                    Text("粗").tag(700)
+                    Text("特粗").tag(900)
+                }
+                .pickerStyle(.segmented)
+                HStack {
+                    Text("字间距")
+                    Slider(value: $settingsStore.danmakuLetterSpacing, in: -2...8, step: 0.5)
+                    Text(String(format: "%.1f", settingsStore.danmakuLetterSpacing))
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 34, alignment: .trailing)
+                }
                 HStack {
                     Text("不透明度")
                     Slider(value: $settingsStore.danmakuOpacity, in: 0.3...1.0)
                 }
             }
-            .navigationTitle("弹幕设置")
+            Section("描边") {
+                Toggle("描边", isOn: $settingsStore.danmakuStrokeEnabled)
+                if settingsStore.danmakuStrokeEnabled {
+                    HStack {
+                        Text("描边粗细")
+                        Slider(value: $settingsStore.danmakuStrokeWidth, in: 0...4, step: 0.5)
+                        Text(String(format: "%.1f", settingsStore.danmakuStrokeWidth))
+                            .font(.caption.monospacedDigit())
+                            .frame(width: 34, alignment: .trailing)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Sleep timer sheet
+
+/// Room sleep timer (Pure Live's RoomTimerDialog): presets plus a
+/// custom field; on fire the room pauses, the page stays open.
+struct SleepTimerSheet: View {
+    var activeMinutes: Int?
+    var onSet: (Int) -> Void
+    var onCancel: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var customMinutes = ""
+
+    private let presets = [15, 30, 45, 60, 90, 120]
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("定时暂停播放") {
+                    ForEach(presets, id: \.self) { minutes in
+                        Button {
+                            onSet(minutes)
+                            dismiss()
+                        } label: {
+                            HStack {
+                                Text("\(minutes) 分钟")
+                                Spacer()
+                                if activeMinutes == minutes {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                    HStack {
+                        TextField("自定义分钟数", text: $customMinutes)
+                            .keyboardType(.numberPad)
+                        Button("设定") {
+                            if let minutes = Int(customMinutes), minutes >= 1, minutes <= 525600 {
+                                onSet(minutes)
+                                dismiss()
+                            }
+                        }
+                        .disabled(Int(customMinutes) == nil)
+                    }
+                    if activeMinutes != nil {
+                        Button("取消定时", role: .destructive) {
+                            onCancel()
+                            dismiss()
+                        }
+                    }
+                }
+                Section {
+                    Text("到时自动暂停播放，不关闭页面。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("睡眠定时")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
                 }
             }
         }
@@ -655,7 +925,7 @@ struct DanmakuSettingsSheet: View {
 /// standard iOS way to set it programmatically. The view must live
 /// in a hierarchy; PlayerContainerView's parent hosts it via
 /// SystemVolumeView below.
-final class SystemVolume {
+@MainActor final class SystemVolume {
     static let shared = SystemVolume()
     private let volumeView = MPVolumeView(frame: .zero)
 
@@ -855,6 +1125,13 @@ struct FullscreenPlayerView: View {
     var danmakuEnabled: Bool
     var danmakuFontSize: Double
     var danmakuOpacity: Double
+    var danmakuSpeed: Double = 120
+    var danmakuArea: Double = 1.0
+    var danmakuFontWeight: Int = 500
+    var danmakuLetterSpacing: Double = 0
+    var danmakuStrokeEnabled: Bool = true
+    var danmakuStrokeWidth: Double = 1.5
+    var danmakuMaxVisibleCount: Int = 48
     var streams: [PlayStream]
     var isFavorite: Bool
     var onToggleFavorite: () -> Void
@@ -883,9 +1160,16 @@ struct FullscreenPlayerView: View {
                 .ignoresSafeArea()
             if danmakuEnabled {
                 DanmakuOverlayView(
-                    items: Array(danmakuItems.suffix(8)),
+                    items: danmakuItems,
                     fontSize: danmakuFontSize,
-                    opacity: danmakuOpacity
+                    opacity: danmakuOpacity,
+                    speed: danmakuSpeed,
+                    area: danmakuArea,
+                    fontWeight: danmakuFontWeight,
+                    letterSpacing: danmakuLetterSpacing,
+                    strokeEnabled: danmakuStrokeEnabled,
+                    strokeWidth: danmakuStrokeWidth,
+                    maxVisibleCount: danmakuMaxVisibleCount
                 )
             }
             if playerService.state == .loading {

@@ -61,7 +61,8 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
             guard let id = item["id"].stringValue ?? item["categoryId"].stringValue,
                   let name = item["name"].stringValue ?? item["categoryName"].stringValue ?? item["title"].stringValue,
                   !name.isEmpty, seen.insert(id).inserted else { return nil }
-            return LiveCategory(id: "kuaishou-\(id)", platform: .kuaishou, name: name, iconName: nil)
+            let iconString = item["icon"].stringValue ?? item["iconUrl"].stringValue ?? item["pic"].stringValue ?? item["imgUrl"].stringValue ?? ""
+            return LiveCategory(id: "kuaishou-\(id)", platform: .kuaishou, name: name, iconName: nil, iconURL: URL(string: iconString))
         }
     }
 
@@ -79,10 +80,14 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
     }
 
     func categoryRooms(_ category: LiveCategory) async throws -> [LiveRoom] {
+        try await categoryRooms(category, page: 1)
+    }
+
+    func categoryRooms(_ category: LiveCategory, page: Int) async throws -> [LiveRoom] {
         let gameID = category.id.dropFirst("kuaishou-".count)
         // Pure Live: short ids are game boards, long ids are non-game boards.
         let api = gameID.count < 7 ? "gameboard/list" : "non-gameboard/list"
-        let url = "\(Self.webBase)/live_api/\(api)?filterType=0&pageSize=20&gameId=\(gameID)&page=1"
+        let url = "\(Self.webBase)/live_api/\(api)?filterType=0&pageSize=20&gameId=\(gameID)&page=\(page)"
         let json = try await http.getJSON(url)
         return json["data"]["list"].arrayValue.compactMap(Self.room(fromBoardItem:))
     }
@@ -260,10 +265,6 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
     }
 
     // MARK: - Danmaku
-
-    func sampleDanmaku(roomID: String) async -> [DanmakuItem] {
-        [] // no live channel yet; never show fake lines as live danmaku
-    }
 
     func danmakuStream(roomID: String) -> AsyncStream<DanmakuItem> {
 #if !os(Linux)

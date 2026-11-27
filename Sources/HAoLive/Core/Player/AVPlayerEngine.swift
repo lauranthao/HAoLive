@@ -25,7 +25,12 @@ final class AVPlayerEngine: PlayerEngine {
     weak var delegate: (any PlayerEngineDelegate)?
 
     private let player = AVPlayer()
-    private let playerView = AVPlayerView()
+    // No default value: AVPlayerView() is a @MainActor-isolated
+    // initializer, and a stored-property default is checked against
+    // the TYPE's (nonisolated) isolation — marking init() @MainActor
+    // does not cover it (primary #20: same error survived the
+    // @MainActor init). Assigned in the @MainActor init body instead.
+    private let playerView: AVPlayerView
     private var statusObservation: NSKeyValueObservation?
     private var failureObserver: NSObjectProtocol?
     private var lastFailedItem: AVPlayerItem?
@@ -37,7 +42,12 @@ final class AVPlayerEngine: PlayerEngine {
 
     var isPlaying: Bool { opened && !paused }
 
-    init() {
+    // AVPlayerView() is a @MainActor-isolated initializer (Swift 6 /
+    // iOS 26 SDK), so this init must be @MainActor — a nonisolated
+    // init cannot hold a main-actor-isolated default value (primary
+    // #19). Called only from the @MainActor service's makeEngines().
+    @MainActor init() {
+        self.playerView = AVPlayerView()
         playerView.setPlayer(player)
     }
 
@@ -56,7 +66,12 @@ final class AVPlayerEngine: PlayerEngine {
         if headers.isEmpty {
             asset = AVURLAsset(url: url)
         } else {
-            asset = AVURLAsset(url: url, options: [AVURLAssetHTTPHeaderFieldsKey: headers])
+            // AVURLAssetHTTPHeaderFieldsKey is UNDOCUMENTED: AVFoundation
+            // exports it but never declares it in its public headers, so
+            // Swift cannot see the constant ("cannot find in scope",
+            // primary #24). The string literal is what Flutter's
+            // video_player and HAoMovie use for the same option.
+            asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
         }
         let item = AVPlayerItem(asset: asset)
         observe(item: item)
@@ -125,7 +140,10 @@ final class AVPlayerEngine: PlayerEngine {
         }
     }
 
-    private func handleItemStatus(_ status: AVPlayerItem.Status, for item: AVPlayerItem) {
+    // @MainActor: these call the @MainActor PlayerEngineDelegate, and
+    // are only ever invoked from Task { @MainActor in } closures
+    // (observe()) or from each other (primary #19).
+    @MainActor private func handleItemStatus(_ status: AVPlayerItem.Status, for item: AVPlayerItem) {
         // A stale callback for an item that is no longer current.
         guard item === player.currentItem else { return }
         switch status {
@@ -146,7 +164,7 @@ final class AVPlayerEngine: PlayerEngine {
 
     /// The same item's failure is handled once — the status callback
     /// and the failure notification can both fire for it.
-    private func handleItemFailure(_ message: String, for item: AVPlayerItem) {
+    @MainActor private func handleItemFailure(_ message: String, for item: AVPlayerItem) {
         guard lastFailedItem !== item else { return }
         lastFailedItem = item
         guard item === player.currentItem else { return }

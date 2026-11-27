@@ -1,5 +1,12 @@
 // SettingsStore.swift
 // HAo Live — settings: theme, player, danmaku, cache. Local only.
+//
+// Danmaku fields follow Pure Live's DanmakuSettingsController
+// (practical subset for the SwiftUI lanes: speed in px/s, display
+// area fraction, font weight / letter spacing, stroke, max visible
+// count, collapse-repeated). New fields carry defaults, so older
+// saved settings (v1) still decode — the synthesized Codable init
+// uses decodeIfPresent for defaulted properties.
 
 import Combine
 import Foundation
@@ -29,6 +36,8 @@ final class SettingsStore: ObservableObject {
     @Published var preferredLine: String = "" {
         didSet { save() }
     }
+
+    // MARK: - Danmaku (Pure Live's DanmakuSettingsController, subset)
     @Published var danmakuEnabled: Bool = true {
         didSet { save() }
     }
@@ -38,18 +47,66 @@ final class SettingsStore: ObservableObject {
     @Published var danmakuOpacity: Double = 0.9 {
         didSet { save() }
     }
+    /// Scroll speed in points per second (Pure Live: 120 px/s).
+    @Published var danmakuSpeed: Double = 120 {
+        didSet { save() }
+    }
+    /// Fraction of the overlay height danmaku may use (0.25...1.0).
+    @Published var danmakuArea: Double = 1.0 {
+        didSet { save() }
+    }
+    /// Font weight 100...900 (Pure Live default 500).
+    @Published var danmakuFontWeight: Int = 500 {
+        didSet { save() }
+    }
+    @Published var danmakuLetterSpacing: Double = 0 {
+        didSet { save() }
+    }
+    @Published var danmakuStrokeEnabled: Bool = true {
+        didSet { save() }
+    }
+    /// Stroke width 0...4 (Pure Live default 1.5).
+    @Published var danmakuStrokeWidth: Double = 1.5 {
+        didSet { save() }
+    }
+    /// Max messages on screen at once (Pure Live default 48).
+    @Published var danmakuMaxVisibleCount: Int = 48 {
+        didSet { save() }
+    }
+    /// Collapse identical messages posted within a few seconds.
+    @Published var danmakuCollapseRepeated: Bool = false {
+        didSet { save() }
+    }
     @Published var blockedKeywords: [String] = [] {
+        didSet { save() }
+    }
+    @Published var blockedUsers: [String] = [] {
+        didSet { save() }
+    }
+
+    /// Starred category ids ("{platform}-{id}"), shown first.
+    @Published var favoriteCategoryIDs: [String] = [] {
         didSet { save() }
     }
 
     private struct Saved: Codable {
-        var theme: HaoLiveTheme
-        var preferredQuality: String
-        var preferredLine: String
-        var danmakuEnabled: Bool
-        var danmakuFontSize: Double
-        var danmakuOpacity: Double
-        var blockedKeywords: [String]
+        var theme: HaoLiveTheme = .system
+        var preferredQuality: String = ""
+        var preferredLine: String = ""
+        var danmakuEnabled: Bool = true
+        var danmakuFontSize: Double = 14
+        var danmakuOpacity: Double = 0.9
+        var danmakuSpeed: Double = 120
+        var danmakuArea: Double = 1.0
+        var danmakuFontWeight: Int = 500
+        var danmakuLetterSpacing: Double = 0
+        var danmakuStrokeEnabled: Bool = true
+        var danmakuStrokeWidth: Double = 1.5
+        var danmakuMaxVisibleCount: Int = 48
+        var danmakuCollapseRepeated: Bool = false
+        var blockedKeywords: [String] = []
+        var blockedUsers: [String] = []
+        var favoriteCategoryIDs: [String] = []
     }
 
     private let key = "hao.live.settings.v1"
@@ -58,20 +115,13 @@ final class SettingsStore: ObservableObject {
         load()
     }
 
-    /// Approximate local cache size (favorites + history JSON).
-    var cacheSizeText: String {
-        let defaults = UserDefaults.standard
-        var bytes = 0
-        for key in ["hao.live.favorites.v1", "hao.live.history.v1", key] {
-            bytes += defaults.data(forKey: key)?.count ?? 0
-        }
+    /// Image-cache size (URLCache disk + memory). The cover cache
+    /// (NSCache) has no measurable size, so this is the number shown.
+    var imageCacheSizeText: String {
+        let bytes = URLCache.shared.currentDiskUsage + URLCache.shared.currentMemoryUsage
         if bytes < 1024 { return "\(bytes) B" }
-        return String(format: "%.1f KB", Double(bytes) / 1024.0)
-    }
-
-    func clearCache() {
-        UserDefaults.standard.removeObject(forKey: "hao.live.favorites.v1")
-        UserDefaults.standard.removeObject(forKey: "hao.live.history.v1")
+        if bytes < 1024 * 1024 { return String(format: "%.1f KB", Double(bytes) / 1024.0) }
+        return String(format: "%.1f MB", Double(bytes) / (1024.0 * 1024.0))
     }
 
     private func load() {
@@ -83,7 +133,17 @@ final class SettingsStore: ObservableObject {
         danmakuEnabled = decoded.danmakuEnabled
         danmakuFontSize = decoded.danmakuFontSize
         danmakuOpacity = decoded.danmakuOpacity
+        danmakuSpeed = decoded.danmakuSpeed
+        danmakuArea = decoded.danmakuArea
+        danmakuFontWeight = decoded.danmakuFontWeight
+        danmakuLetterSpacing = decoded.danmakuLetterSpacing
+        danmakuStrokeEnabled = decoded.danmakuStrokeEnabled
+        danmakuStrokeWidth = decoded.danmakuStrokeWidth
+        danmakuMaxVisibleCount = decoded.danmakuMaxVisibleCount
+        danmakuCollapseRepeated = decoded.danmakuCollapseRepeated
         blockedKeywords = decoded.blockedKeywords
+        blockedUsers = decoded.blockedUsers
+        favoriteCategoryIDs = decoded.favoriteCategoryIDs
     }
 
     private func save() {
@@ -94,7 +154,17 @@ final class SettingsStore: ObservableObject {
             danmakuEnabled: danmakuEnabled,
             danmakuFontSize: danmakuFontSize,
             danmakuOpacity: danmakuOpacity,
-            blockedKeywords: blockedKeywords
+            danmakuSpeed: danmakuSpeed,
+            danmakuArea: danmakuArea,
+            danmakuFontWeight: danmakuFontWeight,
+            danmakuLetterSpacing: danmakuLetterSpacing,
+            danmakuStrokeEnabled: danmakuStrokeEnabled,
+            danmakuStrokeWidth: danmakuStrokeWidth,
+            danmakuMaxVisibleCount: danmakuMaxVisibleCount,
+            danmakuCollapseRepeated: danmakuCollapseRepeated,
+            blockedKeywords: blockedKeywords,
+            blockedUsers: blockedUsers,
+            favoriteCategoryIDs: favoriteCategoryIDs
         )
         guard let data = try? JSONEncoder().encode(saved) else { return }
         UserDefaults.standard.set(data, forKey: key)

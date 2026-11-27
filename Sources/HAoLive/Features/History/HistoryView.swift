@@ -1,17 +1,27 @@
 // HistoryView.swift
-// HAo Live — watch history: rooms watched, tap to reopen, clear all.
-// (Was the 录制 tab's lower half; recording was removed, history stays.)
+// HAo Live — watch history: rooms watched, tap to reopen.
+// Swipe to delete one entry; retention is by count (set in
+// Settings → 历史保留). Was the 录制 tab's lower half; recording
+// was removed, history stays.
 
 import SwiftUI
 
 struct HistoryView: View {
     @EnvironmentObject private var historyStore: HistoryStore
 
+    @State private var visibleCount = 30
+
+    private let pageSize = 30
+
+    private var visibleEntries: [HistoryEntry] {
+        Array(historyStore.entries.prefix(visibleCount))
+    }
+
     var body: some View {
         List {
             if !historyStore.entries.isEmpty {
                 Section("观看历史") {
-                    ForEach(historyStore.entries) { entry in
+                    ForEach(visibleEntries) { entry in
                         NavigationLink(value: entry.room) {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -26,6 +36,16 @@ struct HistoryView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
+                    }
+                    .onDelete { offsets in
+                        for index in offsets {
+                            historyStore.remove(visibleEntries[index])
+                        }
+                    }
+                    if historyStore.entries.count > visibleCount {
+                        Button("加载更多") { visibleCount += pageSize }
+                            .font(.subheadline)
+                            .frame(maxWidth: .infinity)
                     }
                 }
             } else {

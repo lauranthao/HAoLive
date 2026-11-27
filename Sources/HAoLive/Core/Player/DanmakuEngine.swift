@@ -12,13 +12,19 @@ final class DanmakuEngine {
     var blockedUsers: Set<String>
     /// Keep at most this many live messages on screen.
     var maxOnScreen: Int
+    /// Collapse identical messages posted within `repeatedWindow`.
+    var collapseRepeated: Bool
+    var repeatedWindow: TimeInterval
 
     private var seenIDs = Set<String>()
+    private var recentTexts: [String: Date] = [:]
 
-    init(blockedKeywords: [String] = [], blockedUsers: Set<String> = [], maxOnScreen: Int = 40) {
+    init(blockedKeywords: [String] = [], blockedUsers: Set<String> = [], maxOnScreen: Int = 40, collapseRepeated: Bool = false, repeatedWindow: TimeInterval = 5) {
         self.blockedKeywords = blockedKeywords
         self.blockedUsers = blockedUsers
         self.maxOnScreen = maxOnScreen
+        self.collapseRepeated = collapseRepeated
+        self.repeatedWindow = repeatedWindow
     }
 
     /// Returns true when this message may be shown.
@@ -27,6 +33,17 @@ final class DanmakuEngine {
         if blockedUsers.contains(item.user) { return false }
         for keyword in blockedKeywords where !keyword.isEmpty {
             if item.text.localizedCaseInsensitiveContains(keyword) { return false }
+        }
+        if collapseRepeated {
+            let now = Date()
+            if let last = recentTexts[item.text], now.timeIntervalSince(last) < repeatedWindow {
+                return false
+            }
+            recentTexts[item.text] = now
+            // Prune stale entries so the table stays small.
+            if recentTexts.count > 200 {
+                recentTexts = recentTexts.filter { now.timeIntervalSince($0.value) < repeatedWindow }
+            }
         }
         seenIDs.insert(item.id)
         return true

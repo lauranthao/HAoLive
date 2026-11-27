@@ -30,6 +30,17 @@
 // lowres / skiploopfilter set. Per source: http-header-fields
 // (the playback headers), demuxer-lavf-format 'hls' for HLS,
 // force-seekable no, cache-pause no (live).
+//
+// ENUMS: mpv's C enums are used as their BARE constants
+// (MPV_FORMAT_FLAG, MPV_EVENT_SHUTDOWN, MPV_RENDER_PARAM_API_TYPE,
+// ...), NOT the dotted Swift members (mpv_format.flag,
+// mpv_event_id.shutdown, ...). Swift does not import these enum
+// cases under their stripped names — Bitrise primary #21 failed on
+// all 17 dotted references, and the Linux Swift 6.2 toolchain
+// reproduces the same "has no member" errors against MPVKit's real
+// headers, while the bare constants typecheck in every position
+// (args, struct inits, switch cases, comparisons). Do not
+// "modernise" them back to dotted form.
 
 #if canImport(Libmpv)
 import Libmpv
@@ -54,7 +65,12 @@ final class MpvPlayerEngine: PlayerEngine {
     private var frameBuffer: UnsafeMutableRawPointer?
     private var frameBufferSize = 0
 
-    private let videoViewInstance = MpvVideoView()
+    // No default value: MpvVideoView() is a @MainActor-isolated
+    // initializer, and a stored-property default is checked against
+    // the TYPE's (nonisolated) isolation — marking init() @MainActor
+    // does not cover it (primary #20). Assigned in the @MainActor
+    // init body instead, before the early returns.
+    private let videoViewInstance: MpvVideoView
     var videoView: UIView { videoViewInstance }
 
     var isPlaying: Bool { opened && !paused }
@@ -70,7 +86,12 @@ final class MpvPlayerEngine: PlayerEngine {
 
     // MARK: - Lifecycle
 
-    init() {
+    // MpvVideoView() is a @MainActor-isolated initializer (Swift 6 /
+    // iOS 26 SDK), so this init must be @MainActor — a nonisolated
+    // init cannot hold a main-actor-isolated default value (primary
+    // #19). Called only from the @MainActor service's makeEngines().
+    @MainActor init() {
+        self.videoViewInstance = MpvVideoView()
         guard let handle = mpv_create() else { return }
         self.handle = handle
         applyOptions(handle)
@@ -101,7 +122,15 @@ final class MpvPlayerEngine: PlayerEngine {
 
     func open(url: URL, headers: [String: String], format: String) {
         guard let handle else {
-            delegate?.engine(self, didFailWith: "mpv 未能初始化")
+            // open() is a nonisolated protocol witness, so it cannot
+            // itself be @MainActor — hop for the @MainActor delegate.
+            // No [weak self] here: Task { @MainActor [weak self] in } from
+            // nonisolated code errors "sending 'self' risks causing data
+            // races" (primary #23). The one-shot hop captures self strongly,
+            // like AVPlayerEngine does — no cycle, the Task ends with its run.
+            Task { @MainActor in
+                self.delegate?.engine(self, didFailWith: "mpv 未能初始化")
+            }
             return
         }
         opened = false
@@ -123,15 +152,24 @@ final class MpvPlayerEngine: PlayerEngine {
                 setOption(handle, "user-agent", userAgent)
             }
         }
-        var args: [UnsafeMutablePointer<CChar>?] = [
-            strdup("loadfile"), strdup(url.absoluteString), strdup("replace"), nil,
-        ]
-        defer { args.forEach { if let p = $0 { free(p) } } }
-        let result = args.withUnsafeBufferPointer { buffer in
-            mpv_command(handle, UnsafeMutablePointer(mutating: buffer.baseAddress))
+        // mpv_command takes const char **: the array must hold
+        // UnsafePointer<CChar> (not mutable) — primary #22 failed with
+        // "conflicting arguments to generic parameter 'Pointee'" when the
+        // array held UnsafeMutablePointer<CChar>. The strdup'd buffers are
+        // kept in `owned` so free() still gets the mutable pointers back.
+        let owned: [UnsafeMutablePointer<CChar>?] = [strdup("loadfile"), strdup(url.absoluteString), strdup("replace")]
+        defer { owned.forEach { if let p = $0 { free(p) } } }
+        var args: [UnsafePointer<CChar>?] = owned.map { $0.map { UnsafePointer($0) } } + [nil]
+        // const char ** = mutable outer pointer to const char *: the array
+        // holds UnsafePointer<CChar> but must go through the MUTABLE buffer
+        // pointer (withUnsafeMutableBufferPointer), not withUnsafeBufferPointer.
+        let result = args.withUnsafeMutableBufferPointer { buffer in
+            mpv_command(handle, buffer.baseAddress)
         }
         if result < 0 {
-            delegate?.engine(self, didFailWith: errorMessage(result))
+            Task { @MainActor in
+                self.delegate?.engine(self, didFailWith: self.errorMessage(result))
+            }
             return
         }
         opened = true
@@ -214,7 +252,7 @@ final class MpvPlayerEngine: PlayerEngine {
     private func setPropertyFlag(_ handle: OpaquePointer, _ name: String, _ value: Bool) {
         name.withCString { namePtr in
             var flag: Int64 = value ? 1 : 0
-            _ = mpv_set_property(handle, namePtr, mpv_format.flag, &flag)
+            _ = mpv_set_property(handle, namePtr, MPV_FORMAT_FLAG, &flag)
         }
     }
 
@@ -228,8 +266,8 @@ final class MpvPlayerEngine: PlayerEngine {
     private func createRenderContext(_ handle: OpaquePointer) {
         "sw".withCString { apiPtr in
             var params = [
-                mpv_render_param(type: mpv_render_param_type.apiType, data: UnsafeMutableRawPointer(mutating: apiPtr)),
-                mpv_render_param(type: mpv_render_param_type.invalid, data: nil),
+                mpv_render_param(type: MPV_RENDER_PARAM_API_TYPE, data: UnsafeMutableRawPointer(mutating: apiPtr)),
+                mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil),
             ]
             var context: OpaquePointer?
             let result = params.withUnsafeMutableBufferPointer { buffer in
@@ -249,10 +287,10 @@ final class MpvPlayerEngine: PlayerEngine {
     private func observeVideoSize(_ handle: OpaquePointer) {
         // dwidth/dheight drive the render buffer size.
         "dwidth".withCString { name in
-            _ = mpv_observe_property(handle, 1, name, mpv_format.int64)
+            _ = mpv_observe_property(handle, 1, name, MPV_FORMAT_INT64)
         }
         "dheight".withCString { name in
-            _ = mpv_observe_property(handle, 2, name, mpv_format.int64)
+            _ = mpv_observe_property(handle, 2, name, MPV_FORMAT_INT64)
         }
     }
 
@@ -288,11 +326,11 @@ final class MpvPlayerEngine: PlayerEngine {
         let image: CGImage? = "rgba".withCString { formatPtr in
             swSize.withUnsafeMutableBufferPointer { sizePtr in
                 var params = [
-                    mpv_render_param(type: mpv_render_param_type.swSize, data: UnsafeMutableRawPointer(sizePtr.baseAddress)),
-                    mpv_render_param(type: mpv_render_param_type.swFormat, data: UnsafeMutableRawPointer(mutating: formatPtr)),
-                    mpv_render_param(type: mpv_render_param_type.swStride, data: UnsafeMutableRawPointer(&strideValue)),
-                    mpv_render_param(type: mpv_render_param_type.swPointer, data: UnsafeMutableRawPointer(&pointer)),
-                    mpv_render_param(type: mpv_render_param_type.invalid, data: nil),
+                    mpv_render_param(type: MPV_RENDER_PARAM_SW_SIZE, data: UnsafeMutableRawPointer(sizePtr.baseAddress)),
+                    mpv_render_param(type: MPV_RENDER_PARAM_SW_FORMAT, data: UnsafeMutableRawPointer(mutating: formatPtr)),
+                    mpv_render_param(type: MPV_RENDER_PARAM_SW_STRIDE, data: UnsafeMutableRawPointer(&strideValue)),
+                    mpv_render_param(type: MPV_RENDER_PARAM_SW_POINTER, data: UnsafeMutableRawPointer(&pointer)),
+                    mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil),
                 ]
                 let result = params.withUnsafeMutableBufferPointer { buffer in
                     mpv_render_context_render(context, buffer.baseAddress)
@@ -314,8 +352,7 @@ final class MpvPlayerEngine: PlayerEngine {
         guard let image else { return }
         let isFirst = !firstFrameReported
         if isFirst { firstFrameReported = true }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+        Task { @MainActor in
             self.videoViewInstance.display(image)
             if isFirst {
                 self.delegate?.engineDidRenderFirstFrame(self)
@@ -341,13 +378,13 @@ final class MpvPlayerEngine: PlayerEngine {
         while !destroying {
             guard let event = mpv_wait_event(handle, 1.0) else { continue }
             switch event.pointee.event_id {
-            case mpv_event_id.shutdown:
+            case MPV_EVENT_SHUTDOWN:
                 destroying = true
-            case mpv_event_id.endFile:
+            case MPV_EVENT_END_FILE:
                 handleEndFile(event.pointee)
-            case mpv_event_id.videoReconfig:
+            case MPV_EVENT_VIDEO_RECONFIG:
                 renderUpdateRequested()
-            case mpv_event_id.propertyChange:
+            case MPV_EVENT_PROPERTY_CHANGE:
                 handlePropertyChange(event.pointee)
             default:
                 break
@@ -372,15 +409,13 @@ final class MpvPlayerEngine: PlayerEngine {
         guard opened, let data = event.data else { return }
         let endFile = data.assumingMemoryBound(to: mpv_event_end_file.self).pointee
         switch endFile.reason {
-        case mpv_end_file_reason.error:
+        case MPV_END_FILE_REASON_ERROR:
             let message = endFile.error != 0 ? errorMessage(endFile.error) : "播放失败"
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+            Task { @MainActor in
                 self.delegate?.engine(self, didFailWith: message)
             }
-        case mpv_end_file_reason.eof:
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+        case MPV_END_FILE_REASON_EOF:
+            Task { @MainActor in
                 self.delegate?.engine(self, didFailWith: "直播流已结束")
             }
         default:
@@ -391,12 +426,14 @@ final class MpvPlayerEngine: PlayerEngine {
     private func handlePropertyChange(_ event: mpv_event) {
         guard let data = event.data else { return }
         let property = data.assumingMemoryBound(to: mpv_event_property.self).pointee
-        guard property.format == mpv_format.int64, let valuePtr = property.data else { return }
+        guard property.format == MPV_FORMAT_INT64, let valuePtr = property.data else { return }
         let value = valuePtr.assumingMemoryBound(to: Int64.self).pointee
         guard value > 0 else { return }
-        if property.reply_userdata == 1 {
+        // reply_userdata lives on mpv_event, not on mpv_event_property
+        // (which only has name/format/data) — primary #22.
+        if event.reply_userdata == 1 {
             renderSize.width = CGFloat(min(value, 1920))
-        } else if property.reply_userdata == 2 {
+        } else if event.reply_userdata == 2 {
             renderSize.height = CGFloat(min(value, 1080))
         }
     }

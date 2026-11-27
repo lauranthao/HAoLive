@@ -17,14 +17,26 @@ protocol LiveSite: AnyObject, Sendable {
     /// Recommended rooms on the platform's front page.
     func recommendRooms() async throws -> [LiveRoom]
 
+    /// Recommended rooms, page N (1-based). Default: page 1 only.
+    func recommendRooms(page: Int) async throws -> [LiveRoom]
+
     /// Rooms inside one category.
     func categoryRooms(_ category: LiveCategory) async throws -> [LiveRoom]
+
+    /// Rooms inside one category, page N (1-based). Default: page 1 only.
+    func categoryRooms(_ category: LiveCategory, page: Int) async throws -> [LiveRoom]
 
     /// Search rooms by keyword.
     func searchRooms(keyword: String) async throws -> [LiveRoom]
 
+    /// Search rooms by keyword, page N (1-based). Default: page 1 only.
+    func searchRooms(keyword: String, page: Int) async throws -> [LiveRoom]
+
     /// Search anchors by keyword.
     func searchAnchors(keyword: String) async throws -> [LiveRoom]
+
+    /// Search anchors by keyword, page N (1-based). Default: page 1 only.
+    func searchAnchors(keyword: String, page: Int) async throws -> [LiveRoom]
 
     /// Full detail for one room.
     func roomDetail(roomID: String) async throws -> LiveRoom
@@ -35,21 +47,40 @@ protocol LiveSite: AnyObject, Sendable {
     /// getPlayUrls(liveroom:) reads it instead of re-fetching.
     func playURLs(room: LiveRoom) async throws -> [PlayStream]
 
-    /// Sample danmaku lines for the room (stub data in this skeleton;
-    /// the real adapter will open the platform's danmaku channel).
-    func sampleDanmaku(roomID: String) async -> [DanmakuItem]
-
     /// Live danmaku stream for a room. Real adapters open the
-    /// platform's danmaku channel and yield items as they arrive; the
-    /// default implementation yields nothing, so callers fall back to
-    /// `sampleDanmaku` (stubs) or show no danmaku (real adapters whose
-    /// channel is not implemented yet).
+    /// platform's danmaku channel and yield items as they arrive;
+    /// the default implementation yields nothing, so rooms whose
+    /// channel is not implemented yet simply show no danmaku.
+    /// (There is deliberately no sample/fake danmaku anywhere:
+    /// a room with no live channel shows an honest empty state.)
     func danmakuStream(roomID: String) -> AsyncStream<DanmakuItem>
 }
 
 extension LiveSite {
     func danmakuStream(roomID: String) -> AsyncStream<DanmakuItem> {
         AsyncStream { $0.finish() }
+    }
+
+    /// Paged lists default to page 1 only; adapters override the
+    /// paged methods where the platform's API actually pages.
+    func recommendRooms(page: Int) async throws -> [LiveRoom] {
+        guard page <= 1 else { return [] }
+        return try await recommendRooms()
+    }
+
+    func categoryRooms(_ category: LiveCategory, page: Int) async throws -> [LiveRoom] {
+        guard page <= 1 else { return [] }
+        return try await categoryRooms(category)
+    }
+
+    func searchRooms(keyword: String, page: Int) async throws -> [LiveRoom] {
+        guard page <= 1 else { return [] }
+        return try await searchRooms(keyword: keyword)
+    }
+
+    func searchAnchors(keyword: String, page: Int) async throws -> [LiveRoom] {
+        guard page <= 1 else { return [] }
+        return try await searchAnchors(keyword: keyword)
     }
 }
 
