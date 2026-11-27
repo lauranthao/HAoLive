@@ -12,6 +12,25 @@ struct PlayStream: Identifiable, Hashable, Codable, Sendable {
     var url: URL
     var quality: String
     var line: String
+
+    /// FLV / RTMP streams need an FLV-capable engine (mpv / VLC).
+    /// AVPlayer cannot play them — the player reports this honestly
+    /// instead of showing a black screen. Douyu's web API is FLV-only
+    /// (verified live 2026-11-27: signed getH5PlayV1 returns no
+    /// hls_url at any rate or CDN).
+    var isFLV: Bool {
+        let path = url.path.lowercased()
+        return url.scheme?.lowercased() == "rtmp" || path.hasSuffix(".flv")
+    }
+
+    /// ATS blocks plain-http media: upgrade http:// stream URLs to
+    /// https:// (all five platforms serve the same stream over https).
+    var httpsURL: URL {
+        guard url.scheme?.lowercased() == "http",
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        components.scheme = "https"
+        return components.url ?? url
+    }
 }
 
 /// Picker rules over a stream list. Pure functions, no UI.

@@ -7,11 +7,19 @@
 //       has_parent_node, second_node, first_node}] — the category list
 //     roomStore.roomInfo: {room: {id_str, status (2 = live, 4 = ended),
 //       title, user_count_str}, web_rid, anchor: {nickname,
-//       avatar_thumb: {url_list}}, web_stream_url: {
-//       flv_pull_url: {FULL_HD1, HD1, SD1, SD2},
-//       hls_pull_url: {FULL_HD1, HD1, SD1, SD2}} | null}
+//       avatar_thumb: {url_list}}, web_stream_url: {...} | null}
+//   Stream URLs — Pure Live's route (the room probed 2026-11-27 was
+//   offline, so web_stream_url was null and no live room's stream
+//   keys could be verified from this VM; needs a device):
+//     modern: web_stream_url.live_core_sdk_data.pull_data.stream_data
+//       (a JSON string; data: {qualityKey: {main: {flv, hls}}})
+//     legacy: web_stream_url.hls_pull_url_map and .hls_pull_url
+//       (qualityKey -> URL string or {url_list: [...]})
+//   Quality keys are joined by key, never by position; "ao" is
+//   audio-only and is skipped. Only HLS URLs are offered (AVPlayer
+//   cannot play FLV); stream_data's main.flv is the FLV-engine input
+//   for later.
 //   Quality keys: FULL_HD1 原画, HD1 超清, SD1 高清, SD2 标清.
-//   Only HLS URLs are offered (AVPlayer cannot play FLV).
 // NOT verifiable from this VM — the webcast JSON APIs all refuse
 // this egress IP (feed: "url doesn't match", enter: empty reply,
 // room list: 404), so recommend / category rooms / search call those
@@ -36,7 +44,6 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
     private static let qualityNames: [String: String] = [
         "FULL_HD1": "原画", "HD1": "超清", "SD1": "高清", "SD2": "标清",
     ]
-    private static let qualityOrder = ["FULL_HD1", "HD1", "SD1", "SD2"]
 
     // MARK: - Lists
 
@@ -126,25 +133,63 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
         let roomInfo = try await roomInfo(for: roomID)
         let streamURL = roomInfo["web_stream_url"]
         guard !streamURL.isNull else { return [] } // offline: no stream
-        return Self.streams(fromStreamURL: streamURL["hls_pull_url"])
+        return Self.streams(fromStreamURL: streamURL)
     }
 
-    /// Pure parser for the hls_pull_url map: one stream per quality
-    /// key, best quality first. Testable without the network.
-    static func streams(fromStreamURL hls: JSONValue) -> [PlayStream] {
+    /// Pure parser for the whole web_stream_url object: the modern
+    /// live_core_sdk_data.pull_data.stream_data payload (a JSON string;
+    /// per quality key, main.hls) joined by quality key with the
+    /// legacy hls_pull_url_map and hls_pull_url maps. Audio-only
+    /// ("ao") keys are skipped — they carry no video track.
+    /// Testable without the network.
+    static func streams(fromStreamURL streamURL: JSONValue) -> [PlayStream] {
+        // Modern payload: stream_data is a JSON string
+        // {"data": {qualityKey: {main: {flv, hls}}}}.
+        var modernHLS: [String: String] = [:]
+        if let text = streamURL["live_core_sdk_data"]["pull_data"]["stream_data"].stringValue,
+           let data = text.data(using: .utf8),
+           let json = JSONValue.parse(data) {
+            for (key, value) in json["data"].objectValue {
+                if let hls = value["main"]["hls"].stringValue, !hls.isEmpty {
+                    modernHLS[key.lowercased()] = hls
+                }
+            }
+        }
+        // Legacy maps: qualityKey -> URL string or {url_list: [...]}.
+        var legacyHLS: [String: String] = [:]
+        for mapKey in ["hls_pull_url_map", "hls_pull_url"] {
+            for (key, value) in streamURL[mapKey].objectValue {
+                let urlString = value.stringValue ?? value["url_list"][0].stringValue
+                if let urlString, !urlString.isEmpty {
+                    legacyHLS[key.lowercased()] = urlString
+                }
+            }
+        }
+        // Display names from resolution_name (keys matched
+        // case-insensitively), else the known key table, else the raw key.
+        var resolutionNames: [String: String] = [:]
+        for (key, value) in streamURL["resolution_name"].objectValue {
+            if let name = value.stringValue, !name.isEmpty {
+                resolutionNames[key.lowercased()] = name
+            }
+        }
+        // All quality keys, joined by key (never by position).
+        var keys = Array(modernHLS.keys)
+        for key in legacyHLS.keys where !keys.contains(key) {
+            keys.append(key)
+        }
+        // Known rank first (原画 > 超清 > 高清 > 标清), then the rest.
+        let rank = ["full_hd1": 0, "hd1": 1, "sd1": 2, "sd2": 3]
+        keys.sort { (rank[$0] ?? 99) < (rank[$1] ?? 99) }
         var streams: [PlayStream] = []
-        for key in Self.qualityOrder {
-            let value = hls[key]
-            guard !value.isNull else { continue }
-            // The pull URL is a plain string; some responses wrap it
-            // in {url_list: [...]} — accept both.
-            let urlString = value.stringValue ?? value["url_list"][0].stringValue
-            guard let urlString, let url = URL(string: urlString) else { continue }
-            streams.append(PlayStream(
-                url: url,
-                quality: Self.qualityNames[key] ?? key,
-                line: "主线路"
-            ))
+        for key in keys {
+            if key == "ao" { continue } // audio-only pull URL, no video
+            guard let urlString = modernHLS[key] ?? legacyHLS[key],
+                  let url = URL(string: urlString) else { continue }
+            let display = resolutionNames[key]
+                ?? Self.qualityNames[key.uppercased()]
+                ?? key
+            streams.append(PlayStream(url: url, quality: display, line: "主线路"))
         }
         return streams
     }

@@ -17,6 +17,7 @@ struct LiveRoomView: View {
     @StateObject private var playerService = LivePlayerService()
     @State private var streams: [PlayStream] = []
     @State private var showingQualityPicker = false
+    @State private var isFullscreen = false
     @State private var danmakuEngine = DanmakuEngine()
     @State private var visibleDanmaku: [DanmakuItem] = []
     @State private var loadError: String?
@@ -49,6 +50,18 @@ struct LiveRoomView: View {
                 playerService.switchStream(stream)
             }
         }
+        .fullScreenCover(isPresented: $isFullscreen) {
+            FullscreenPlayerView(
+                playerService: playerService,
+                danmakuItems: visibleDanmaku,
+                danmakuEnabled: settingsStore.danmakuEnabled,
+                danmakuFontSize: settingsStore.danmakuFontSize,
+                danmakuOpacity: settingsStore.danmakuOpacity,
+                streams: streams,
+                onSelectQuality: { stream in playerService.switchStream(stream) },
+                onClose: { isFullscreen = false }
+            )
+        }
         .task { await enterRoom() }
         .onDisappear {
             danmakuTask?.cancel()
@@ -61,15 +74,26 @@ struct LiveRoomView: View {
 
     private var playerArea: some View {
         ZStack {
-            VideoPlayer(player: playerService.player)
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                .background(.black)
+            // Only one VideoPlayer exists at a time: the inline one is
+            // removed while the fullscreen cover shows the same player.
+            if !isFullscreen {
+                VideoPlayer(player: playerService.player)
+                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                    .background(.black)
+            } else {
+                Color.black
+                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            }
             if settingsStore.danmakuEnabled {
                 DanmakuOverlayView(
                     items: visibleDanmaku,
                     fontSize: settingsStore.danmakuFontSize,
                     opacity: settingsStore.danmakuOpacity
                 )
+            }
+            if playerService.state == .loading {
+                ProgressView()
+                    .tint(.white)
             }
             if case .failed(let message) = playerService.state {
                 VStack(spacing: 8) {
@@ -143,6 +167,13 @@ struct LiveRoomView: View {
                 settingsStore.danmakuEnabled.toggle()
             } label: {
                 Label("弹幕", systemImage: settingsStore.danmakuEnabled ? "text.bubble.fill" : "text.bubble")
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                isFullscreen = true
+            } label: {
+                Label("全屏", systemImage: "arrow.up.left.and.arrow.down.right")
             }
             .buttonStyle(.bordered)
 
@@ -238,5 +269,106 @@ struct LiveRoomView: View {
                 visibleDanmaku.removeFirst(visibleDanmaku.count - 8)
             }
         }
+    }
+}
+
+/// Fullscreen landscape player. The same AVPlayer instance as the
+/// inline area (only one VideoPlayer exists at a time), with danmaku,
+/// play/pause and quality controls on top. Entering locks landscape
+/// and leaving restores portrait — rotating the phone alone never
+/// changes orientation, and landscape works with the system
+/// orientation lock ON because the AppDelegate overrides it.
+struct FullscreenPlayerView: View {
+    @ObservedObject var playerService: LivePlayerService
+    var danmakuItems: [DanmakuItem]
+    var danmakuEnabled: Bool
+    var danmakuFontSize: Double
+    var danmakuOpacity: Double
+    var streams: [PlayStream]
+    var onSelectQuality: (PlayStream) -> Void
+    var onClose: () -> Void
+
+    @State private var showingQualityPicker = false
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VideoPlayer(player: playerService.player)
+                .ignoresSafeArea()
+            if danmakuEnabled {
+                DanmakuOverlayView(
+                    items: danmakuItems,
+                    fontSize: danmakuFontSize,
+                    opacity: danmakuOpacity
+                )
+            }
+            if playerService.state == .loading {
+                ProgressView()
+                    .tint(.white)
+            }
+            if case .failed(let message) = playerService.state {
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.title2)
+                    Text(message)
+                        .font(.subheadline)
+                }
+                .foregroundStyle(.white)
+                .padding()
+                .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+            }
+            VStack {
+                HStack {
+                    Spacer()
+                    Button {
+                        onClose()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                            .padding(10)
+                            .background(.black.opacity(0.5), in: Circle())
+                    }
+                }
+                Spacer()
+                HStack(spacing: 16) {
+                    Button {
+                        playerService.togglePlayPause()
+                    } label: {
+                        Image(systemName: playerService.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.title2)
+                            .foregroundStyle(.white)
+                            .padding(12)
+                            .background(.black.opacity(0.5), in: Circle())
+                    }
+                    Button {
+                        showingQualityPicker = true
+                    } label: {
+                        Label(currentQualityText, systemImage: "gearshape.fill")
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.5), in: Capsule())
+                    }
+                    .disabled(streams.isEmpty)
+                    Spacer()
+                }
+                .padding()
+            }
+            .padding()
+        }
+        .sheet(isPresented: $showingQualityPicker) {
+            QualityPickerView(streams: streams, selectedStream: playerService.currentStream, onSelect: onSelectQuality)
+        }
+        .onAppear { OrientationLock.shared.lockLandscape() }
+        .onDisappear { OrientationLock.shared.lockPortrait() }
+        .statusBarHidden()
+    }
+
+    private var currentQualityText: String {
+        if let stream = playerService.currentStream {
+            return "\(stream.quality) · \(stream.line)"
+        }
+        return "画质"
     }
 }

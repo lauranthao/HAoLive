@@ -165,6 +165,11 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
             if urlString.hasPrefix("http://") {
                 urlString = "https://" + urlString.dropFirst("http://".count)
             }
+            // Pure Live: the anti-code sometimes omits the codec; the
+            // CDN then serves a codec the player cannot use. Force AVC.
+            if !urlString.contains("codec=") {
+                urlString += "&codec=264"
+            }
             guard let url = URL(string: urlString) else { continue }
             let cdn = entry["sCdnType"].stringValue ?? ""
             streams.append(PlayStream(

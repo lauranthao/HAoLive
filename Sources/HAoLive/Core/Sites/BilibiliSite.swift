@@ -161,9 +161,60 @@ final class BilibiliSite: LiveSite, @unchecked Sendable {
         let url = "\(Self.apiBase)/xlive/web-room/v2/index/getRoomPlayInfo?room_id=\(roomID)&protocol=0,1&format=0,1,2&codec=0,1&qn=10000&platform=web&ptype=8"
         let json = try await http.getJSON(url)
         guard json["code"].intValue == 0 else { throw LiveSiteError.invalidResponse }
-        let playurl = json["data"]["playurl_info"]["playurl"]
+        let data = json["data"]
+        // Carousel rooms (live_status 2) carry no playurl_info: they
+        // loop a recorded video instead of a live stream. Pure Live
+        // resolves the video through getRoundPlayVideo + x/player/playurl.
+        if data["playurl_info"].isNull, data["live_status"].intValue == 2 {
+            return try await carouselStreams(roomID: roomID)
+        }
+        let playurl = data["playurl_info"]["playurl"]
         guard !playurl.isNull else { return [] } // room offline
         return Self.streams(fromPlayInfo: playurl)
+    }
+
+    /// The video a carousel room is looping, as playable streams.
+    private func carouselStreams(roomID: String) async throws -> [PlayStream] {
+        let round = try await http.getJSON("\(Self.apiBase)/live/getRoundPlayVideo?room_id=\(roomID)")
+        guard let video = Self.roundVideo(fromJSON: round) else { return [] }
+        let play = try await http.getJSON(
+            "https://api.bilibili.com/x/player/playurl?bvid=\(video.bvid)&cid=\(video.cid)&qn=80&fnval=0&fnver=0&fourk=1&platform=html5&high_quality=1",
+            headers: ["Referer": "https://www.bilibili.com/"]
+        )
+        return Self.videoURLs(fromJSON: play).map {
+            PlayStream(url: $0, quality: "轮播", line: "主线路")
+        }
+    }
+
+    /// Pure parser for a getRoundPlayVideo response: the video being
+    /// looped (bvid + cid). Testable without the network.
+    static func roundVideo(fromJSON json: JSONValue) -> (bvid: String, cid: Int)? {
+        guard json["code"].intValue == 0 else { return nil }
+        let data = json["data"]
+        guard let bvid = data["bvid"].stringValue, !bvid.isEmpty,
+              bvid.hasPrefix("BV"),
+              let cid = data["cid"].intValue, cid > 0 else { return nil }
+        return (bvid: bvid, cid: cid)
+    }
+
+    /// Pure parser for an x/player/playurl response: the video file
+    /// URLs (url + backup_url of each durl part), deduped. Testable
+    /// without the network.
+    static func videoURLs(fromJSON json: JSONValue) -> [URL] {
+        guard json["code"].intValue == 0 else { return [] }
+        var urls: [URL] = []
+        for part in json["data"]["durl"].arrayValue {
+            var candidates: [String] = []
+            if let url = part["url"].stringValue { candidates.append(url) }
+            candidates.append(contentsOf: part["backup_url"].arrayValue.compactMap(\.stringValue))
+            for raw in candidates {
+                let trimmed = raw.trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("http"), let url = URL(string: trimmed),
+                      !urls.contains(url) else { continue }
+                urls.append(url)
+            }
+        }
+        return urls
     }
 
     /// Pure parser for the play-info payload: quality names from
