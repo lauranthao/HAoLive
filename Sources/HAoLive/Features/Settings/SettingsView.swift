@@ -28,6 +28,16 @@ struct SettingsView: View {
         var tagName: String
     }
 
+    /// docs/version.json: the published (version, build). The tag
+    /// alone cannot tell build 7 from build 8 — same lesson as
+    /// HAo Music's updater. RULE: every build bump must update
+    /// docs/version.json in the same commit.
+    private struct VersionJSON: Decodable {
+        var version: String
+        var build: Int
+        var ipa: String?
+    }
+
     private var appVersionText: String {
         let info = Bundle.main.infoDictionary
         let version = info?["CFBundleShortVersionString"] as? String ?? "?"
@@ -201,13 +211,28 @@ struct SettingsView: View {
 
     private func checkForUpdate() async {
         updateStatus = .checking
+        let info = Bundle.main.infoDictionary
+        let currentVersion = info?["CFBundleShortVersionString"] as? String ?? ""
+        let currentBuild = Int(info?["CFBundleVersion"] as? String ?? "") ?? 0
+        // Primary: docs/version.json compares (version, build).
+        // Unreachable (Pages off) -> fall back to the tag.
+        if let url = URL(string: "https://lauranthao.github.io/HAoLive/version.json"),
+           let (data, response) = try? await URLSession.shared.data(from: url),
+           let http = response as? HTTPURLResponse, http.statusCode == 200,
+           let latest = try? JSONDecoder().decode(VersionJSON.self, from: data) {
+            let newerVersion = latest.version.compare(currentVersion, options: .numeric) == .orderedDescending
+            let newerBuild = latest.version == currentVersion && latest.build > currentBuild
+            updateStatus = (newerVersion || newerBuild) ? .available("v\(latest.version)") : .latest
+            return
+        }
         do {
             let url = URL(string: "https://api.github.com/repos/lauranthao/HAoLive/releases/latest")!
             let (data, _) = try await URLSession.shared.data(from: url)
-            let release = try JSONDecoder().decode(ReleaseJSON.self, from: data)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let release = try decoder.decode(ReleaseJSON.self, from: data)
             let latest = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "v"))
-            let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
-            updateStatus = latest == current ? .latest : .available(release.tagName)
+            updateStatus = latest == currentVersion ? .latest : .available(release.tagName)
         } catch {
             updateStatus = .failed
         }

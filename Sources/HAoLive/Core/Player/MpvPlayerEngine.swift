@@ -64,6 +64,12 @@ import UIKit
     // render thread — a mismatched pair only sizes one frame wrong.
     private nonisolated(unsafe) var handle: OpaquePointer?
     private nonisolated(unsafe) var renderContext: OpaquePointer?
+    /// +1 retain handed to libmpv's render update callback
+    /// (passRetained): the callback may fire after the service drops
+    /// the engine, so an unretained self would dangle. Released in
+    /// the event loop's teardown, after the render context is freed
+    /// (which unregisters the callback).
+    private nonisolated(unsafe) var renderCallbackToken: UnsafeMutableRawPointer?
     private var eventThread: Thread?
     private nonisolated(unsafe) var destroying = false
     private var opened = false
@@ -290,7 +296,11 @@ import UIKit
                 guard let raw else { return }
                 Unmanaged<MpvPlayerEngine>.fromOpaque(raw).takeUnretainedValue().renderUpdateRequested()
             }
-            mpv_render_context_set_update_callback(context, callback, Unmanaged.passUnretained(self).toOpaque())
+            // passRetained: the callback borrows (takeUnretainedValue),
+            // the +1 is released in the event loop's teardown.
+            let token = Unmanaged.passRetained(self).toOpaque()
+            renderCallbackToken = token
+            mpv_render_context_set_update_callback(context, callback, token)
         }
         observeVideoSize(handle)
     }
@@ -337,7 +347,12 @@ import UIKit
         guard let buffer = frameBuffer else { return }
         var swSize: [Int32] = [Int32(width), Int32(height)]
         var strideValue: Int = stride
-        var pointer: UnsafeMutableRawPointer? = buffer
+        // SW_POINTER's data is the frame buffer itself (void*), NOT
+        // the address of a pointer variable: passing &pointer made
+        // libmpv write the whole frame onto the stack, crashing on
+        // the first frame of every room (build 7; reproduced against
+        // system libmpv — segfault inside mpv_render_context_render,
+        // fixed by this one line, 188 frames clean).
         // NOTE: the frame is copied into a Data below (one memcpy per
         // frame) because the render buffer is reused for the next
         // frame — handing the live buffer to the CGImage would tear.
@@ -347,7 +362,7 @@ import UIKit
                     mpv_render_param(type: MPV_RENDER_PARAM_SW_SIZE, data: UnsafeMutableRawPointer(sizePtr.baseAddress)),
                     mpv_render_param(type: MPV_RENDER_PARAM_SW_FORMAT, data: UnsafeMutableRawPointer(mutating: formatPtr)),
                     mpv_render_param(type: MPV_RENDER_PARAM_SW_STRIDE, data: UnsafeMutableRawPointer(&strideValue)),
-                    mpv_render_param(type: MPV_RENDER_PARAM_SW_POINTER, data: UnsafeMutableRawPointer(&pointer)),
+                    mpv_render_param(type: MPV_RENDER_PARAM_SW_POINTER, data: buffer),
                     mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil),
                 ]
                 let result = params.withUnsafeMutableBufferPointer { buffer in
@@ -411,10 +426,16 @@ import UIKit
             }
         }
         // The thread owns the final teardown: render context first,
-        // then the handle, then the frame buffer.
+        // then the handle, then the frame buffer. Freeing the render
+        // context unregisters the update callback, so the retained
+        // self it held is released here, after the free.
         if let context = renderContext {
             mpv_render_context_free(context)
             renderContext = nil
+        }
+        if let token = renderCallbackToken {
+            renderCallbackToken = nil
+            Unmanaged<MpvPlayerEngine>.fromOpaque(token).release()
         }
         mpv_terminate_destroy(handle)
         self.handle = nil
