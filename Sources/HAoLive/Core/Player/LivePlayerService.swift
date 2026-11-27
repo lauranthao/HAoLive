@@ -130,9 +130,11 @@ final class LivePlayerService: ObservableObject {
         ) { [weak self] notification in
             guard let self,
                   let failedItem = notification.object as? AVPlayerItem else { return }
+            // Pull the values out before hopping: Notification is not
+            // Sendable, so the Task must not capture it (Swift 6).
+            let message = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?.localizedDescription ?? "播放失败"
             Task { @MainActor in
-                let message = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?.localizedDescription
-                self.handleItemFailure(message ?? "播放失败", for: failedItem)
+                self.handleItemFailure(message, for: failedItem)
             }
         }
     }
