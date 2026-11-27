@@ -392,7 +392,10 @@ final class MpvGLVideoView: UIView {
         super.init(frame: frame)
         backgroundColor = .black
         displayLayer.videoGravity = .resizeAspect
-        displayLayer.expectsMediaDataInRealTime = true
+        // NOTE: expectsMediaDataInRealTime lives on
+        // AVSampleBufferRenderSynchronizer, not on the layer — the
+        // layer drops late frames on its own when fed real-time
+        // timestamps, so there is nothing to set here.
     }
 
     required init?(coder: NSCoder) {
