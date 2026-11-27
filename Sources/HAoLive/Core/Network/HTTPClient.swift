@@ -43,6 +43,33 @@ final class HTTPClient: Sendable {
         return json
     }
 
+    /// GET returning the response headers too (keys lowercased).
+    /// Needed when the caller must read set-cookie — Douyin hands out
+    /// its anonymous ttwid cookie in set-cookie, and the body alone
+    /// does not carry it. Multiple set-cookie lines arrive combined
+    /// in one value; the caller scans it for the cookie names it
+    /// needs instead of splitting on commas (cookie dates contain
+    /// commas, so a comma split would corrupt Expires values).
+    func getWithHeaders(_ urlString: String, headers: [String: String] = [:], timeout: TimeInterval = 15) async throws -> (data: Data, headers: [String: String]) {
+        guard let url = URL(string: urlString) else { throw LiveSiteError.invalidResponse }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = "GET"
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        let (data, http) = try await performWithResponse(request)
+        var out: [String: String] = [:]
+        for (key, value) in http.allHeaderFields {
+            if let k = key as? String, let v = value as? String {
+                out[k.lowercased()] = v
+            }
+        }
+        return (data, out)
+    }
+
     /// POST with application/x-www-form-urlencoded body (Douyu's play API).
     func postForm(_ urlString: String, fields: [String: String], headers: [String: String] = [:], timeout: TimeInterval = 15) async throws -> Data {
         guard let url = URL(string: urlString) else { throw LiveSiteError.invalidResponse }
@@ -71,6 +98,10 @@ final class HTTPClient: Sendable {
     }
 
     private func perform(_ request: URLRequest) async throws -> Data {
+        try await performWithResponse(request).0
+    }
+
+    private func performWithResponse(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await session.data(for: request)
@@ -83,6 +114,6 @@ final class HTTPClient: Sendable {
         guard (200..<300).contains(http.statusCode) else {
             throw LiveSiteError.httpStatus(http.statusCode)
         }
-        return data
+        return (data, http)
     }
 }

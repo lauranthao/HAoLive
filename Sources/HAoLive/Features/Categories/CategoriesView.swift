@@ -2,7 +2,9 @@
 // HAo Live — browse by platform, then by category.
 // Nothing is auto-selected: the user picks a category first.
 // Starred categories (my sections) persist; category cards show
-// artwork when the platform provides it; rooms page with load-more.
+// artwork when the platform provides it. Tapping a category pushes
+// its own rooms page (CategoryRoomsView) — rooms never load inline
+// here.
 
 import SwiftUI
 
@@ -11,14 +13,7 @@ struct CategoriesView: View {
 
     @State private var selectedPlatform: LivePlatform = .bilibili
     @State private var categories: [LiveCategory] = []
-    @State private var selectedCategory: LiveCategory?
-    @State private var rooms: [LiveRoom] = []
-    @State private var page = 1
-    @State private var canLoadMore = false
     @State private var isLoadingCategories = false
-    @State private var isLoadingRooms = false
-    @State private var isLoadingMore = false
-    @State private var roomsError: String?
     @State private var searchText = ""
 
     private let columns = [
@@ -56,20 +51,18 @@ struct CategoriesView: View {
             } else {
                 LazyVGrid(columns: columns, spacing: HaoLiveDesign.gridSpacing) {
                     ForEach(filteredCategories) { category in
-                        CategoryCard(
-                            category: category,
-                            selected: selectedCategory?.id == category.id,
-                            starred: settingsStore.favoriteCategoryIDs.contains(category.id),
-                            onSelect: { select(category) },
-                            onToggleStar: { toggleStar(category) }
-                        )
+                        NavigationLink(value: category) {
+                            CategoryCard(
+                                category: category,
+                                starred: settingsStore.favoriteCategoryIDs.contains(category.id),
+                                onToggleStar: { toggleStar(category) }
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, HaoLiveDesign.pagePadding)
                 .padding(.vertical, 8)
-            }
-            if let category = selectedCategory {
-                roomsSection(for: category)
             }
         }
         .refreshable { await reload() }
@@ -77,8 +70,10 @@ struct CategoriesView: View {
         .navigationDestination(for: LiveRoom.self) { room in
             LiveRoomView(room: room)
         }
+        .navigationDestination(for: LiveCategory.self) { category in
+            CategoryRoomsView(category: category)
+        }
         .task(id: selectedPlatform) { await loadCategories() }
-        .task(id: selectedCategory) { await loadRooms(reset: true) }
     }
 
     // MARK: - Sections
@@ -89,8 +84,6 @@ struct CategoriesView: View {
                 ForEach(LivePlatform.allCases, id: \.self) { platform in
                     Button {
                         selectedPlatform = platform
-                        selectedCategory = nil
-                        rooms = []
                     } label: {
                         HStack(spacing: 6) {
                             Circle()
@@ -137,12 +130,15 @@ struct CategoriesView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(starredCategories) { category in
-                        Button(category.name) { select(category) }
-                            .font(.subheadline)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(selectedCategory?.id == category.id ? HaoLiveDesign.liveRed : Color(.secondarySystemBackground), in: Capsule())
-                            .foregroundStyle(selectedCategory?.id == category.id ? .white : .primary)
+                        NavigationLink(value: category) {
+                            Text(category.name)
+                                .font(.subheadline)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color(.secondarySystemBackground), in: Capsule())
+                                .foregroundStyle(.primary)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, HaoLiveDesign.pagePadding)
@@ -151,46 +147,7 @@ struct CategoriesView: View {
         .padding(.vertical, 4)
     }
 
-    private func roomsSection(for category: LiveCategory) -> some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(category.name)
-                    .font(.headline)
-                Spacer()
-                if let error = roomsError, rooms.isEmpty {
-                    Button("重试") { Task { await loadRooms(reset: true) } }
-                        .font(.subheadline)
-                }
-            }
-            .padding(.horizontal, HaoLiveDesign.pagePadding)
-            .padding(.vertical, 8)
-            if isLoadingRooms {
-                ProgressView().padding(.top, 40)
-            } else if let error = roomsError, rooms.isEmpty {
-                ContentUnavailableView("加载失败", systemImage: "wifi.exclamationmark", description: Text(error))
-                    .padding(.top, 40)
-            } else if rooms.isEmpty {
-                ContentUnavailableView("这个分区暂无房间", systemImage: "square.grid.2x2")
-                    .padding(.top, 40)
-            } else {
-                RoomGrid(rooms: rooms)
-                    .padding(HaoLiveDesign.pagePadding)
-                if isLoadingMore {
-                    ProgressView().padding(.vertical, 16)
-                } else if canLoadMore {
-                    Button("加载更多") { Task { await loadRooms(reset: false) } }
-                        .font(.subheadline)
-                        .padding(.vertical, 16)
-                }
-            }
-        }
-    }
-
     // MARK: - Actions
-
-    private func select(_ category: LiveCategory) {
-        selectedCategory = category
-    }
 
     private func toggleStar(_ category: LiveCategory) {
         var ids = settingsStore.favoriteCategoryIDs
@@ -204,9 +161,6 @@ struct CategoriesView: View {
 
     private func reload() async {
         await loadCategories()
-        if selectedCategory != nil {
-            await loadRooms(reset: true)
-        }
     }
 
     private func loadCategories() async {
@@ -215,89 +169,40 @@ struct CategoriesView: View {
         defer { isLoadingCategories = false }
         if let list = try? await site.categories() {
             categories = list
-            // Keep the selection only if it still exists; never
-            // force-select the first category.
-            if let selected = selectedCategory, !list.contains(selected) {
-                selectedCategory = nil
-                rooms = []
-            }
-        }
-    }
-
-    private func loadRooms(reset: Bool) async {
-        guard let site = SiteRegistry.site(for: selectedPlatform),
-              let category = selectedCategory else { return }
-        if reset {
-            isLoadingRooms = true
-            roomsError = nil
-            page = 1
-        } else {
-            isLoadingMore = true
-        }
-        defer {
-            isLoadingRooms = false
-            isLoadingMore = false
-        }
-        let targetPage = reset ? 1 : page + 1
-        do {
-            let newRooms = try await site.categoryRooms(category, page: targetPage)
-            if reset {
-                rooms = newRooms
-                page = 1
-            } else {
-                let seen = Set(rooms.map(\.id))
-                rooms.append(contentsOf: newRooms.filter { !seen.contains($0.id) })
-                page = targetPage
-            }
-            canLoadMore = !newRooms.isEmpty
-        } catch {
-            if reset {
-                roomsError = error.localizedDescription
-            } else {
-                roomsError = nil // load-more failure: footer just stays
-                canLoadMore = true
-            }
         }
     }
 }
 
 /// One category card: artwork when available, name, star toggle.
+/// Wrapped in a NavigationLink by the parent — tapping pushes the
+/// category's own rooms page.
 private struct CategoryCard: View {
     let category: LiveCategory
-    let selected: Bool
     let starred: Bool
-    let onSelect: () -> Void
     let onToggleStar: () -> Void
 
     var body: some View {
-        Button(action: onSelect) {
-            VStack(spacing: 6) {
-                ZStack(alignment: .topTrailing) {
-                    CategoryIcon(url: category.iconURL, name: category.name)
-                        .frame(height: 64)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                    Button(action: onToggleStar) {
-                        Image(systemName: starred ? "star.fill" : "star")
-                            .font(.caption)
-                            .foregroundStyle(starred ? .yellow : .white)
-                            .padding(6)
-                            .background(.black.opacity(0.4), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(4)
+        VStack(spacing: 6) {
+            ZStack(alignment: .topTrailing) {
+                CategoryIcon(url: category.iconURL, name: category.name)
+                    .frame(height: 64)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                Button(action: onToggleStar) {
+                    Image(systemName: starred ? "star.fill" : "star")
+                        .font(.caption)
+                        .foregroundStyle(starred ? .yellow : .white)
+                        .padding(6)
+                        .background(.black.opacity(0.4), in: Circle())
                 }
-                Text(category.name)
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
+                .buttonStyle(.plain)
+                .padding(4)
             }
-            .padding(8)
-            .background(selected ? HaoLiveDesign.liveRed.opacity(0.12) : Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: HaoLiveDesign.cardCornerRadius))
-            .overlay(
-                RoundedRectangle(cornerRadius: HaoLiveDesign.cardCornerRadius)
-                    .stroke(selected ? HaoLiveDesign.liveRed : .clear, lineWidth: 1.5)
-            )
+            Text(category.name)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
         }
-        .buttonStyle(.plain)
+        .padding(8)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: HaoLiveDesign.cardCornerRadius))
     }
 }
 

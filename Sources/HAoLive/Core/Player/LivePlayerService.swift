@@ -6,12 +6,14 @@
 //   -> nothing left -> fail honestly. "Fails" means the engine
 //   reported a hard error, or no frame appeared within the
 //   source-ready timeout (18 s, Pure Live's sourceReadyTimeout).
-// Engine order: mpv pinned first (when the libmpv module is
-// present), then the system player for HLS only — the chain as
-// Pure Live registers it (mediaKit -> IJK -> BetterPlayer; IJK's
-// format coverage is a subset of mpv's, so it adds nothing here,
-// and BetterPlayer on iOS IS AVPlayer). chen 2026-11-27 19:53
-// decided to KEEP the system-player fallback ("留").
+// Engine order: per stream format, not pinned globally. HLS goes
+// to the system player first — AVPlayer is fully hardware
+// end-to-end (zero copies), while mpv's software renderer copies
+// every frame through the CPU (the build 8 lag). mpv stays first
+// for FLV / RTMP, which AVPlayer cannot play at all. The loser
+// still sweeps second, so a broken first engine falls through to
+// the other (chen 2026-11-27 19:53 decided to KEEP the system
+// player fallback ("留")).
 // Before the next engine, sources are re-resolved through
 // sourceRefresh (Pure Live's onEngineFallbackSources: signed URLs
 // are single-use, so a fresh resolve is needed per engine).
@@ -80,14 +82,16 @@ final class LivePlayerService: ObservableObject {
         engines = []
         availableStreams = streams
         triedStreamIDs = []
-        engines = makeEngines()
-        engineIndex = 0
-        refreshedForEngine = false
-        lastErrorMessage = nil
         guard let best = StreamPicker.best(streams: streams, preferredQuality: preferredQuality, preferredLine: preferredLine) else {
             state = .failed("暂无可播放的线路")
             return
         }
+        // HLS -> system player first (hardware end-to-end);
+        // FLV / RTMP -> mpv first (AVPlayer cannot play them).
+        engines = makeEngines(systemFirst: !best.isFLV)
+        engineIndex = 0
+        refreshedForEngine = false
+        lastErrorMessage = nil
         candidates = [best] + streams.filter { $0.id != best.id }
         state = .loading
         tryNextCandidate()
@@ -101,7 +105,7 @@ final class LivePlayerService: ObservableObject {
         destroyEngines()
         engines = []
         triedStreamIDs = []
-        engines = makeEngines()
+        engines = makeEngines(systemFirst: !stream.isFLV)
         engineIndex = 0
         refreshedForEngine = false
         lastErrorMessage = nil
@@ -169,16 +173,21 @@ final class LivePlayerService: ObservableObject {
 
     // MARK: - Sweep
 
-    private func makeEngines() -> [any PlayerEngine] {
-        var list: [any PlayerEngine] = []
+    /// Engine order for one open: the system player first when the
+    /// picked stream is HLS (fully hardware, zero copies), mpv first
+    /// when it is FLV / RTMP (AVPlayer cannot play those). The other
+    /// engine is still second in the sweep.
+    private func makeEngines(systemFirst: Bool) -> [any PlayerEngine] {
+        var mpvEngine: (any PlayerEngine)?
         #if canImport(Libmpv)
         let mpv = MpvPlayerEngine()
-        if mpv.isAvailable {
-            list.append(mpv)
-        }
+        if mpv.isAvailable { mpvEngine = mpv }
         #endif
-        list.append(AVPlayerEngine())
-        return list
+        let system = AVPlayerEngine()
+        if systemFirst {
+            return [system] + (mpvEngine.map { [$0] } ?? [])
+        }
+        return (mpvEngine.map { [$0] } ?? []) + [system]
     }
 
     private func destroyEngines() {

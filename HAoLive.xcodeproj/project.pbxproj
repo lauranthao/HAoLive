@@ -23,6 +23,8 @@
 		96C871BFE4FEF9489620B63E = {isa = PBXBuildFile; fileRef = 31336ACE1803952BF0B18931; };
 		0EB954537E5CA2ADB30642A5 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPClient.swift; sourceTree = "<group>"; };
 		97F8AA3D655A9219E821EC30 = {isa = PBXBuildFile; fileRef = 0EB954537E5CA2ADB30642A5; };
+		ED1F043AB72EA11118F5B523 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SM3.swift; sourceTree = "<group>"; };
+		F20BFA33BADB2A2379C4CCE4 = {isa = PBXBuildFile; fileRef = ED1F043AB72EA11118F5B523; };
 		8BD30BD881D49EA22520B091 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZlibInflate.swift; sourceTree = "<group>"; };
 		0A2A8B9C0821CBACB658429A = {isa = PBXBuildFile; fileRef = 8BD30BD881D49EA22520B091; };
 		D6B008D8087A6091558721D2 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BinaryCoding.swift; sourceTree = "<group>"; };
@@ -55,6 +57,8 @@
 		9FAA5E934521E3C0957CDE97 = {isa = PBXBuildFile; fileRef = 0669065BA5D0C0BFA9D18C02; };
 		FE23005CDA30DF78C2B43C0A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinSite.swift; sourceTree = "<group>"; };
 		7D46805FA3989B642787DFB9 = {isa = PBXBuildFile; fileRef = FE23005CDA30DF78C2B43C0A; };
+		789D602867AE21A1D4B8CCE5 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinABogus.swift; sourceTree = "<group>"; };
+		1F8AD8E61AD5C0D1600FA38C = {isa = PBXBuildFile; fileRef = 789D602867AE21A1D4B8CCE5; };
 		E132575FBD9AC65695E13995 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KuaishouSite.swift; sourceTree = "<group>"; };
 		176A5498C32BF8250AEA446F = {isa = PBXBuildFile; fileRef = E132575FBD9AC65695E13995; };
 		14E5B08D85936E933FF61E1A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SiteRegistry.swift; sourceTree = "<group>"; };
@@ -83,6 +87,8 @@
 		7BD2DCB8A5A46175BF4974CC = {isa = PBXBuildFile; fileRef = 6BFB31E5838C4F385B06F9C0; };
 		9365B9A7FD7107BF71FC280C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CategoriesView.swift; sourceTree = "<group>"; };
 		79F1BEF9AB57C405C3C8D2E0 = {isa = PBXBuildFile; fileRef = 9365B9A7FD7107BF71FC280C; };
+		86FE94DF0A41B90A2825F50F = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CategoryRoomsView.swift; sourceTree = "<group>"; };
+		EC37C167B98F3EB653C62CA5 = {isa = PBXBuildFile; fileRef = 86FE94DF0A41B90A2825F50F; };
 		E3BD360F0D9685071BD259FB = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
 		D53DEE531307626270F83742 = {isa = PBXBuildFile; fileRef = E3BD360F0D9685071BD259FB; };
 		9E0C475DFB03D0E58115FBF6 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveRoomView.swift; sourceTree = "<group>"; };
@@ -131,6 +137,7 @@
 			children = (
 				31336ACE1803952BF0B18931,
 				0EB954537E5CA2ADB30642A5,
+				ED1F043AB72EA11118F5B523,
 				8BD30BD881D49EA22520B091,
 				D6B008D8087A6091558721D2,
 			);
@@ -163,6 +170,7 @@
 				FAA93D0DE0EBCA03E16D9CD9,
 				0669065BA5D0C0BFA9D18C02,
 				FE23005CDA30DF78C2B43C0A,
+				789D602867AE21A1D4B8CCE5,
 				E132575FBD9AC65695E13995,
 				14E5B08D85936E933FF61E1A,
 			);
@@ -217,6 +225,7 @@
 			isa = PBXGroup;
 			children = (
 				9365B9A7FD7107BF71FC280C,
+				86FE94DF0A41B90A2825F50F,
 			);
 			name = Categories;
 			path = Categories;
@@ -346,6 +355,7 @@
 				D2D4285D5EA1427A36F4FDFD,
 				96C871BFE4FEF9489620B63E,
 				97F8AA3D655A9219E821EC30,
+				F20BFA33BADB2A2379C4CCE4,
 				0A2A8B9C0821CBACB658429A,
 				B88FD05C1825C86C9364A0BE,
 				8EE6A5106F3E33823FE9E388,
@@ -362,6 +372,7 @@
 				42836DA9C0C683605BF14DC8,
 				9FAA5E934521E3C0957CDE97,
 				7D46805FA3989B642787DFB9,
+				1F8AD8E61AD5C0D1600FA38C,
 				176A5498C32BF8250AEA446F,
 				2B654FC587947F691FABB5D2,
 				5BA1E4CE48362180AF08F9FD,
@@ -376,6 +387,7 @@
 				206C18CE94596F3050E8FB46,
 				7BD2DCB8A5A46175BF4974CC,
 				79F1BEF9AB57C405C3C8D2E0,
+				EC37C167B98F3EB653C62CA5,
 				D53DEE531307626270F83742,
 				33C5ADB9EDD44D4BEF165642,
 				CCB32786AC313A044440493E,

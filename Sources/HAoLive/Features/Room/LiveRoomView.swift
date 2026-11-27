@@ -82,7 +82,6 @@ struct LiveRoomView: View {
             headerRow
             playerArea
             resolutionsRow
-            actionRow
             Divider()
             danmakuPanel
             composerRow
@@ -145,43 +144,6 @@ struct LiveRoomView: View {
             playerService.stop()
             UIScreen.main.brightness = brightnessAtEntry
         }
-    }
-
-    // MARK: - Action row (share / browser / sleep timer / copy link)
-
-    private var actionRow: some View {
-        HStack(spacing: 16) {
-            if let url = roomWebURL {
-                ShareLink(item: url) {
-                    Label("分享", systemImage: "square.and.arrow.up")
-                }
-                Button {
-                    UIApplication.shared.open(url)
-                } label: {
-                    Label("浏览器打开", systemImage: "safari")
-                }
-                Button {
-                    if let stream = playerService.currentStream {
-                        UIPasteboard.general.string = stream.url.absoluteString
-                    }
-                } label: {
-                    Label("复制播放地址", systemImage: "link")
-                }
-                .disabled(playerService.currentStream == nil)
-            }
-            Spacer()
-            Button {
-                showingSleepTimer = true
-            } label: {
-                Label(
-                    sleepMinutes.map { "睡眠 \($0) 分钟" } ?? "睡眠定时",
-                    systemImage: sleepMinutes == nil ? "moon.zzz" : "moon.zzz.fill"
-                )
-            }
-        }
-        .font(.subheadline)
-        .padding(.horizontal, HaoLiveDesign.pagePadding + 4)
-        .padding(.vertical, 8)
     }
 
     /// Local danmaku composer (inline): typed messages show locally
@@ -253,6 +215,14 @@ struct LiveRoomView: View {
                 }
                 if let stream = playerService.currentStream {
                     Button("复制播放地址") { UIPasteboard.general.string = stream.url.absoluteString }
+                }
+                Button {
+                    showingSleepTimer = true
+                } label: {
+                    Label(
+                        sleepMinutes.map { "睡眠 \($0) 分钟" } ?? "睡眠定时",
+                        systemImage: sleepMinutes == nil ? "moon.zzz" : "moon.zzz.fill"
+                    )
                 }
             } label: {
                 Image(systemName: "ellipsis")

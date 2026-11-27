@@ -148,9 +148,10 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
     func playURLs(room: LiveRoom) async throws -> [PlayStream] {
         let roomID = room.roomID
         let did = Self.deviceID()
-        guard let enc = try? await encryption(did: did) else { return [] }
-        // The first call also lists the CDN codes for the line matrix.
-        guard let first = try? await playV1(roomID: roomID, rate: 0, cdn: "", did: did, enc: enc) else { return [] }
+        // One retry: a transient blip on the signing calls leaves
+        // the room with no streams at all (black page), and the
+        // sweep then has nothing to try.
+        guard let (enc, first) = try? await signedFirstPlay(roomID: roomID, did: did) else { return [] }
         let cdns = Self.cdnCodes(fromPlayResponse: first)
         var streams: [PlayStream] = []
         if let stream = Self.stream(fromPlayResponse: first, quality: "原画", line: "主线路") {
@@ -188,6 +189,24 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
                 stream.headers = headers
                 return stream
             }
+    }
+
+    /// Encryption + the first (rate 0) play call, tried twice. The
+    /// first call also lists the CDN codes for the line matrix.
+    /// A transient failure on either call used to return [] with no
+    /// retry — the room then had no streams and no picture.
+    private func signedFirstPlay(roomID: String, did: String) async throws -> (Encryption, JSONValue) {
+        var lastError: (any Error)?
+        for _ in 0..<2 {
+            do {
+                let enc = try await encryption(did: did)
+                let first = try await playV1(roomID: roomID, rate: 0, cdn: "", did: did, enc: enc)
+                return (enc, first)
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? LiveSiteError.invalidResponse
     }
 
     /// The device id the signing binds to. One stable random id,

@@ -21,6 +21,10 @@
 // CPU buffer and displayed as a CGImage. It costs CPU (not GPU);
 // the OpenGL/EAGL path is the performance upgrade if the SDK
 // headers allow it on the build stack, not a correctness fix.
+// Since build 9 the SW path is FLV-only (HLS goes to the hardware
+// player first), capped at 1280x720, and zero-copy: frames render
+// into a two-slot pool and the CGImage reads the slot directly
+// (FrameBufferPool), instead of a Data(bytes:) memcpy per frame.
 //
 // OPTIONS: Pure Live's MediaKitLiveProperties table, translated:
 // protocol whitelist, 2 MB probe, 2 s analyze, 15 s network
@@ -77,8 +81,12 @@ import UIKit
     private var firstFrameReported = false
     private nonisolated(unsafe) var renderPending = false
     private nonisolated(unsafe) var renderSize = CGSize(width: 1280, height: 720)
-    private nonisolated(unsafe) var frameBuffer: UnsafeMutableRawPointer?
-    private nonisolated(unsafe) var frameBufferSize = 0
+    /// Two-slot frame pool (see FrameBufferPool): renderFrame renders
+    /// into the idle slot and hands that slot's memory to the CGImage
+    /// with no copy; the provider's release callback returns the slot.
+    /// Internally locked — safe to touch from the render thread, the
+    /// event loop and the provider callback alike.
+    private nonisolated(unsafe) var framePool = FrameBufferPool()
 
     // Assigned in the init body (primary #20's lesson: when the class
     // was nonisolated, a stored-property default was checked against
@@ -153,7 +161,12 @@ import UIKit
         firstFrameReported = false
         // Per-source properties (Pure Live's per-source table).
         setOption(handle, "http-proxy", "")
-        setOption(handle, "demuxer-lavf-format", format == "hls" ? "hls" : "")
+        // Only force the demuxer for HLS; for FLV (and anything else)
+        // lavf probes the container itself. Setting "" for FLV was a
+        // needless difference between the two paths.
+        if format == "hls" {
+            setOption(handle, "demuxer-lavf-format", "hls")
+        }
         setOption(handle, "force-seekable", "no")
         setOption(handle, "cache-pause", "no")
         if !headers.isEmpty {
@@ -163,7 +176,11 @@ import UIKit
                 .map { "\($0.key): \($0.value)" }
                 .joined(separator: ", ")
             setOption(handle, "http-header-fields", fields)
-            if let userAgent = headers["User-Agent"] {
+            // Header keys arrive lowercase from PlaybackHeaders
+            // ("user-agent"), so look the UA up case-insensitively —
+            // the exact-case lookup silently never matched, and mpv
+            // fell back to its default UA.
+            if let userAgent = headers.first(where: { $0.key.lowercased() == "user-agent" })?.value {
                 setOption(handle, "user-agent", userAgent)
             }
         }
@@ -331,6 +348,13 @@ import UIKit
     /// then hops to the main actor for the view + delegate. The
     /// first-frame flag is read and set inside the hop — the render
     /// thread must not touch @MainActor state.
+    ///
+    /// Zero-copy: the frame is rendered into the pool's idle slot and
+    /// the CGImage reads that slot directly (no Data(bytes:) memcpy
+    /// per frame — the build 8 lag at 1080p). The slot is returned by
+    /// the provider's release callback when the image is done; if
+    /// both slots are still on screen the frame is skipped instead of
+    /// blocking (framedrop is on).
     nonisolated private func renderFrame() {
         defer { renderPending = false }
         guard let context = renderContext else { return }
@@ -339,12 +363,7 @@ import UIKit
         guard width > 0, height > 0 else { return }
         let stride = width * 4
         let size = stride * height
-        if frameBuffer == nil || frameBufferSize < size {
-            frameBuffer?.deallocate()
-            frameBuffer = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 16)
-            frameBufferSize = size
-        }
-        guard let buffer = frameBuffer else { return }
+        guard let slot = framePool.acquire(size: size) else { return }
         var swSize: [Int32] = [Int32(width), Int32(height)]
         var strideValue: Int = stride
         // SW_POINTER's data is the frame buffer itself (void*), NOT
@@ -353,16 +372,13 @@ import UIKit
         // the first frame of every room (build 7; reproduced against
         // system libmpv — segfault inside mpv_render_context_render,
         // fixed by this one line, 188 frames clean).
-        // NOTE: the frame is copied into a Data below (one memcpy per
-        // frame) because the render buffer is reused for the next
-        // frame — handing the live buffer to the CGImage would tear.
         let image: CGImage? = "rgba".withCString { formatPtr in
             swSize.withUnsafeMutableBufferPointer { sizePtr in
                 var params = [
                     mpv_render_param(type: MPV_RENDER_PARAM_SW_SIZE, data: UnsafeMutableRawPointer(sizePtr.baseAddress)),
                     mpv_render_param(type: MPV_RENDER_PARAM_SW_FORMAT, data: UnsafeMutableRawPointer(mutating: formatPtr)),
                     mpv_render_param(type: MPV_RENDER_PARAM_SW_STRIDE, data: UnsafeMutableRawPointer(&strideValue)),
-                    mpv_render_param(type: MPV_RENDER_PARAM_SW_POINTER, data: buffer),
+                    mpv_render_param(type: MPV_RENDER_PARAM_SW_POINTER, data: slot.ptr),
                     mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil),
                 ]
                 let result = params.withUnsafeMutableBufferPointer { buffer in
@@ -372,7 +388,24 @@ import UIKit
                 // rgba in memory = R,G,B,A per pixel; the video is opaque.
                 let colorSpace = CGColorSpaceCreateDeviceRGB()
                 let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
-                guard let dataProvider = CGDataProvider(data: Data(bytes: buffer, count: size) as CFData) else { return nil }
+                // The provider retains this context (+1); its release
+                // callback takes it back and returns the slot to the
+                // pool. If the provider itself cannot be created, the
+                // retain is balanced here and the slot is freed.
+                let contextBox = Unmanaged.passRetained(FrameProviderContext(pool: framePool, index: slot.index)).toOpaque()
+                guard let dataProvider = CGDataProvider(
+                    dataInfo: contextBox,
+                    data: slot.ptr,
+                    size: size,
+                    releaseData: { info, _, _ in
+                        guard let info else { return }
+                        Unmanaged<FrameProviderContext>.fromOpaque(info).takeRetainedValue().release()
+                    }
+                ) else {
+                    Unmanaged<FrameProviderContext>.fromOpaque(contextBox).takeRetainedValue()
+                    framePool.release(index: slot.index)
+                    return nil
+                }
                 return CGImage(
                     width: width, height: height,
                     bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: stride,
@@ -382,7 +415,10 @@ import UIKit
                 )
             }
         }
-        guard let image else { return }
+        guard let image else {
+            framePool.release(index: slot.index)
+            return
+        }
         Task { @MainActor in
             self.videoViewInstance.display(image)
             if !self.firstFrameReported {
@@ -439,9 +475,10 @@ import UIKit
         }
         mpv_terminate_destroy(handle)
         self.handle = nil
-        frameBuffer?.deallocate()
-        frameBuffer = nil
-        frameBufferSize = 0
+        // Slots still on screen are freed by their provider release
+        // callbacks (teardown marks the pool dead for that); idle
+        // slots are freed here.
+        framePool.teardown()
     }
 
     /// nonisolated (called from the event loop): extract the failure
@@ -478,11 +515,93 @@ import UIKit
         guard value > 0 else { return }
         // reply_userdata lives on mpv_event, not on mpv_event_property
         // (which only has name/format/data) — primary #22.
+        // Capped at 1280x720: the software renderer rasterises every
+        // pixel on the CPU, and 1080p rooms were the build 8 lag
+        // (HLS goes to the hardware player first now; this cap is for
+        // the FLV rooms that still need mpv).
         if event.reply_userdata == 1 {
-            renderSize.width = CGFloat(min(value, 1920))
+            renderSize.width = CGFloat(min(value, 1280))
         } else if event.reply_userdata == 2 {
-            renderSize.height = CGFloat(min(value, 1080))
+            renderSize.height = CGFloat(min(value, 720))
         }
+    }
+}
+
+/// Two-slot frame buffer pool for the software renderer.
+/// renderFrame renders into the idle slot and hands that slot's
+/// memory to the CGImage with no copy; the slot comes back when the
+/// image's provider is released. All state is behind one lock: the
+/// render thread acquires, the provider release callback (any
+/// thread) releases, the event loop tears down. @unchecked Sendable:
+/// every access goes through the lock.
+private final class FrameBufferPool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var slots: [UnsafeMutableRawPointer?] = [nil, nil]
+    private var sizes: [Int] = [0, 0]
+    private var inUse: [Bool] = [false, false]
+    private var dead = false
+
+    /// The idle slot's buffer, grown to at least `size`, marked in
+    /// use. Nil when both slots are still on screen (the caller
+    /// skips the frame instead of blocking).
+    func acquire(size: Int) -> (index: Int, ptr: UnsafeMutableRawPointer)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !dead else { return nil }
+        for i in 0..<2 where !inUse[i] {
+            if sizes[i] < size {
+                slots[i]?.deallocate()
+                slots[i] = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 16)
+                sizes[i] = size
+            }
+            inUse[i] = true
+            return (i, slots[i]!)
+        }
+        return nil
+    }
+
+    /// Return a slot. After teardown the slot's memory is freed
+    /// here instead — the provider may outlive the engine.
+    func release(index: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard (0..<2).contains(index) else { return }
+        if dead {
+            slots[index]?.deallocate()
+            slots[index] = nil
+            sizes[index] = 0
+        }
+        inUse[index] = false
+    }
+
+    /// Engine teardown: idle slots are freed now; slots still on
+    /// screen are freed by their release callbacks.
+    func teardown() {
+        lock.lock()
+        defer { lock.unlock() }
+        dead = true
+        for i in 0..<2 where !inUse[i] {
+            slots[i]?.deallocate()
+            slots[i] = nil
+            sizes[i] = 0
+        }
+    }
+}
+
+/// What a CGDataProvider's dataInfo carries: the pool plus the slot
+/// index, so the release callback can return the slot. Retained by
+/// the provider (+1) and taken back in the callback.
+private final class FrameProviderContext {
+    let pool: FrameBufferPool
+    let index: Int
+
+    init(pool: FrameBufferPool, index: Int) {
+        self.pool = pool
+        self.index = index
+    }
+
+    func release() {
+        pool.release(index: index)
     }
 }
 
