@@ -552,14 +552,24 @@ final class LivePlayerService: ObservableObject {
             // The decoder actually in use (hwdec-current): "no" =
             // software decode. Empty until the first property event
             // arrives — engineDidBecomeReady refreshes the name then.
+            // Build 17: the hwdec mode the setting asked for, so a
+            // "软解" reading says which side is at fault — mode
+            // 关闭 means the setting turned hardware off; mode
+            // 自动安全 with a 软解 current means mpv fell back.
             let decode = mpv.hwdecCurrent
+            let modeText: String
+            switch MpvPlayerEngine.hwdecMode {
+            case "no": modeText = "关闭"
+            case "auto": modeText = "自动"
+            default: modeText = "自动安全"
+            }
             let decoded: String
             if decode.isEmpty {
-                decoded = base
+                decoded = "\(base) · \(modeText)"
             } else if decode == "no" {
-                decoded = "\(base) · 软解"
+                decoded = "\(base) · 软解 · \(modeText)"
             } else {
-                decoded = "\(base) · \(decode)"
+                decoded = "\(base) · \(decode) · \(modeText)"
             }
             // Build 15: Pure Live's stall diagnostics on the tag —
             // download speed (cache-speed) and dropped frames

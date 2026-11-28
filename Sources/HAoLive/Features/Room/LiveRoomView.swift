@@ -356,6 +356,20 @@ struct LiveRoomView: View {
                         .background(.black.opacity(0.6), in: Circle())
                 }
             }
+            // Persistent diagnostics pill (build 17): the tag used
+            // to live in the chrome's bottom bar, so it vanished
+            // with the auto-hiding chrome and was truncated to
+            // 140 pt — chen's "没有tag". It now sits on the video
+            // itself, always visible, full text, never intercepting
+            // touches. Same pill inline and fullscreen.
+            VStack {
+                DiagnosticTagPill(engineName: playerService.engineName)
+                    .padding(.top, 64)
+                    .padding(.leading, 12)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .allowsHitTesting(false)
         }
         .contentShape(Rectangle())
         .onGeometryChange(for: CGSize.self) { $0.size } action: { videoSize = $0 }
@@ -1000,6 +1014,26 @@ struct SystemVolumeView: UIViewRepresentable {
 /// (fullscreen adds the clock + battery). Bottom left: play/pause,
 /// refresh, favorite, danmaku toggle, danmaku settings. Bottom
 /// right: video fit, expand (fullscreen toggle). Fullscreen adds a
+/// Persistent on-screen diagnostics pill (build 17): render path +
+/// decoder + hwdec mode + buffer + download speed + drops, always
+/// on the video, never hidden with the chrome, never truncated.
+private struct DiagnosticTagPill: View {
+    let engineName: String
+
+    var body: some View {
+        if engineName != "—" {
+            Text(engineName)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.white.opacity(0.85))
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.black.opacity(0.5), in: Capsule())
+                .allowsHitTesting(false)
+        }
+    }
+}
+
 /// local danmaku composer in the middle of the bottom bar.
 struct PlayerChromeView: View {
     @ObservedObject var service: LivePlayerService
@@ -1071,23 +1105,10 @@ struct PlayerChromeView: View {
                         .frame(maxWidth: 420)
                 }
                 Spacer()
-                // On-screen render-path indicator (build 12): the path
-                // used to live only in engineName / logs, which chen
-                // cannot see — so three builds of "还是很卡" could never
-                // say GL or SW. Short tag here (inline and fullscreen
-                // share this chrome); the full text, with the GL
-                // failure reason and decoder, is in the header •••
-                // menu and in engineName.
-                if service.engineName != "—" {
-                    Text(service.engineName)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.white.opacity(0.85))
-                        .lineLimit(1)
-                        .frame(maxWidth: 140)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.black.opacity(0.5), in: Capsule())
-                }
+                // (Build 17: the render-path tag moved out of the
+                // chrome into the persistent DiagnosticTagPill on
+                // the video — the chrome pill hid with the controls
+                // and truncated the diagnostics to 140 pt.)
                 if isFullscreen {
                     Button(qualityText) { onOpenQuality() }
                         .font(.subheadline)
@@ -1327,6 +1348,16 @@ struct FullscreenPlayerView: View {
                         .background(.black.opacity(0.6), in: Circle())
                 }
             }
+            // Persistent diagnostics pill (build 17) — same as the
+            // inline player: always on the video, full text.
+            VStack {
+                DiagnosticTagPill(engineName: playerService.engineName)
+                    .padding(.top, 64)
+                    .padding(.leading, 12)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .allowsHitTesting(false)
         }
         .contentShape(Rectangle())
         .onGeometryChange(for: CGSize.self) { $0.size } action: { videoSize = $0 }

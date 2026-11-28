@@ -778,6 +778,13 @@ import UIKit
             guard property.format == MPV_FORMAT_STRING, let valuePtr = property.data,
                   let cString = valuePtr.assumingMemoryBound(to: UnsafePointer<CChar>?.self).pointee else { return }
             hwdecCurrent = String(cString: cString)
+            // Build 17: a decoder change must refresh the tag.
+            // Before this the handler returned without notifying,
+            // so the pill could keep showing the pre-decode "no"
+            // (软解) long after videotoolbox had engaged — the tag
+            // only refreshed on cache events, which are rare during
+            // steady playback. Throttled to 1/s like the rest.
+            notifyCacheStateChanged()
             return
         }
         // demuxer-cache-duration (userdata 4) is a double: seconds
