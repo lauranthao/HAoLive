@@ -416,6 +416,21 @@ final class MpvGLRenderer {
             sampleTiming: &timing,
             sampleBufferOut: &sampleBuffer
         ) == noErr, let sampleBuffer else { return }
+        // Latest frame wins (build 16 — the Pure Live read): media_kit's
+        // iOS path never queues frames for display. Its texture holds
+        // only the newest rendered frame (SwappableObjectManager's
+        // current) and Flutter's engine samples it at the next vsync,
+        // so frames rendered between vsyncs are silently skipped.
+        // HAoLive used to enqueue EVERY rendered frame with PTS=now,
+        // so after any uneven production (network catch-up, audio
+        // clock correction, a slow render) the layer had to play a
+        // burst of near-identical-PTS frames in sequence, then a
+        // gap — "two frames at once, then a stall". flush() drops
+        // the not-yet-displayed frame(s) so only the newest remains
+        // queued, the same latest-wins presentation; the currently
+        // displayed frame is untouched. PTS stays "now": with one
+        // pending frame it displays at the next vsync.
+        layer.flush()
         layer.enqueue(sampleBuffer)
         if !firstFrameReported {
             firstFrameReported = true

@@ -7,9 +7,11 @@ HAo Live — 直播应用，参照 Pure Live 的**功能**，界面与实现均�
 - 平台：iOS 17+，Swift 6，SwiftUI，mpv 单一播放器（MPVKit 1.1.0-n9.0.2，FLV 走 mpv session 内拼接；无系统播放器兜底、无内核切换）
 - 无强制登录；收藏与历史只存本机
 - 无启动动画：进应用直接到主界面
-- 当前版本：0.1.0 build 15（2026-11-28）
+- 当前版本：0.1.0 build 16（2026-11-28）
 
 ## 版本历史
+
+- **0.1.0 build 16（2026-11-28）：** 按 Pure Live 的送屏方式改（chen 让看 Pure Live 的写法，逐项对完）：media_kit iOS 不排队显示——纹理只留最新一帧，Flutter 引擎每个 vsync 只取最新一帧，中间的帧无声跳过；HAoLive 之前是每渲一帧就包上 PTS=now 全排进显示层，网络一抖追赶出几帧就得连放几帧再顿一下。这一版 enqueue 前先 flush 掉还没显示的旧帧，只留最新一帧，同样“最新帧胜出”。同时把 build 14 自己改的缓冲（12 秒/64MB）改回 Pure Live 的 6 秒/32MB，不留自己的改法。tag 上的下载速度和丢帧数保留（那是 Pure Live 自己的诊断）。
 
 - **0.1.0 build 15（2026-11-28）：** 按 Pure Live 的写法，把它自己的卡顿诊断（buffering_probe.dart / playback_stats.dart）做到 tag 上：下载速度（cache-speed，蓝光 30M 需要 3.75 MB/s 持续）和丢帧数（frame-drop-count，渲染丢的；没有时看 decoder-frame-drop-count，解码丢的）。tag 刷新最多一秒一次，等缓冲翻转立刻显示。这一版只加诊断，不改播放——下次卡，那行字直接写明是网跟不上还是帧在丢。
 

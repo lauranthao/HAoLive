@@ -408,13 +408,13 @@ import UIKit
         // the GL path needs (wzgrx iOS has only libmpv as video
         // output driver; media_kit_video defaults vo to 'libmpv'
         // and sets it as a property). ao is left unset like wzgrx
-        // (mpv's iOS default is audiounit). Everything else is
-        // wzgrx's table except cache-secs / demuxer-max-bytes
-        // (build 14: 12 s / 64 MiB, see below) — the old 3.x values
-        // (2 MiB probe, 30 s cache, 8 s readahead, 96 MB buffer,
-        // low-end lowres preset, framedrop) are gone: wzgrx measured
-        // first frame 1802 ms -> 708 ms with the 1 MiB / 1 s probe,
-        // and plays 原画 on these values.
+        // (mpv's iOS default is audiounit). Everything is wzgrx's
+        // table, verbatim — build 14's 12 s / 64 MiB cache was my
+        // own deviation and is reverted in build 16 ("别自作主张").
+        // The old 3.x values (2 MiB probe, 30 s cache, 8 s readahead,
+        // 96 MB buffer, low-end lowres preset, framedrop) are gone:
+        // wzgrx measured first frame 1802 ms -> 708 ms with the
+        // 1 MiB / 1 s probe, and plays 原画 on these values.
         setOption(handle, "vo", "libmpv") // iOS render API (see above)
         // hwdec follows the setting (Pure Live's hwdec setting:
         // auto / auto-safe / no; wzgrx default auto-safe).
@@ -434,15 +434,13 @@ import UIKit
         setOption(handle, "network-timeout", "15")
         setOption(handle, "cache", "yes")
         setOption(handle, "cache-on-disk", "no")
-        // Build 14 deliberate deviation from wzgrx's table (6 s /
-        // 32 MiB): at 蓝光 30M a 6 s cache is 22.5 MB and drains in
-        // seconds on any throughput dip, so a high-bitrate room
-        // stalls on the feed, not on render or decode (build 13's
-        // tag proved both live). 12 s / 64 MiB still keeps live
-        // latency modest; the tag now shows the real buffered
-        // seconds, so the depth is visible, not guessed.
-        setOption(handle, "cache-secs", "12")
-        setOption(handle, "demuxer-max-bytes", "67108864")
+        // wzgrx's table, verbatim (6 s / 32 MiB). Build 14 changed
+        // this to 12 s / 64 MiB on my own reasoning — chen's call is
+        // no own deviations ("别自作主张"), and he says his network
+        // is fine, so the depth goes back to Pure Live's values in
+        // build 16. The tag still shows the real buffered seconds.
+        setOption(handle, "cache-secs", "6")
+        setOption(handle, "demuxer-max-bytes", "33554432")
         setOption(handle, "demuxer-max-back-bytes", "4194304")
         setOption(handle, "demuxer-donate-buffer", "no")
         setOption(handle, "demuxer-readahead-secs", "2")
