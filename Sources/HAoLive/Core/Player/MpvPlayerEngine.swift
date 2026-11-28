@@ -82,6 +82,22 @@ import UIKit
 
     private(set) var renderPath: RenderPath = .sw
 
+    /// A presented-frame stall marks the mpv engine unusable
+    /// (canPlay false) so the sweep does not retry the same dead
+    /// GPU path on the next candidate. The service recreates the
+    /// engine once for it (wzgrx recovery step 3) — see the
+    /// delegate below. Lives outside the simulator-gated GL block:
+    /// canPlay (line 160) and LivePlayerService read it on every
+    /// build, and on the simulator GL never activates so it stays
+    /// false (primary #38).
+    private(set) var glStalled = false
+    private func reportGLStalled() {
+        guard !glStalled else { return }
+        glStalled = true
+        renderPath = .glFailed(MpvGLRenderer.lastFailureReason ?? "GPU 渲染槽位为空")
+        delegate?.engine(self, didFailWith: "GPU 渲染失败，已切换线路")
+    }
+
     /// hwdec mode from SettingsStore (Pure Live's hwdec setting):
     /// auto / auto-safe / no. Set by the room view before open();
     /// the engine is created per open, so the current value
@@ -212,19 +228,6 @@ import UIKit
         self.glVideoViewInstance = glView
         self.glRenderer = renderer
         return true
-    }
-
-    /// A presented-frame stall marks the mpv engine unusable
-    /// (canPlay false) so the sweep does not retry the same dead
-    /// GPU path on the next candidate. The service recreates the
-    /// engine once for it (wzgrx recovery step 3) — see the
-    /// delegate below.
-    private(set) var glStalled = false
-    private func reportGLStalled() {
-        guard !glStalled else { return }
-        glStalled = true
-        renderPath = .glFailed(MpvGLRenderer.lastFailureReason ?? "GPU 渲染槽位为空")
-        delegate?.engine(self, didFailWith: "GPU 渲染失败，已切换线路")
     }
 
     /// First GL frame: same ready signal the SW path reports from
