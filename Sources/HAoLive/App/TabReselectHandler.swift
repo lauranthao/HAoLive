@@ -26,7 +26,9 @@ final class TabReselectDelegate: NSObject, UITabBarControllerDelegate {
     }
 }
 
-private var tabReselectDelegateKey: UInt8 = 0
+// Only its address is ever used (objc associated-object key); the
+// value is never read or written, so global mutable state is safe.
+nonisolated(unsafe) private var tabReselectDelegateKey: UInt8 = 0
 
 /// An invisible view that installs the reselect delegate on the
 /// enclosing tab bar controller once it exists in the hierarchy.
