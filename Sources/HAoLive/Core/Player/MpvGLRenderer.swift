@@ -32,10 +32,13 @@
 //     fallback when EAGLContext creation fails or the SDK lacks
 //     OpenGLES (canImport gate).
 //
-// THREADING: all GL work runs on one dedicated serial queue; the
-// mpv update callback only signals it (coalesced). The renderer
-// enqueues sample buffers to the display layer directly from that
-// queue — AVSampleBufferDisplayLayer is fed from decode threads by
+// THREADING: all GL work runs on one dedicated serial queue;
+// the mpv update callback enqueues one render per update on it
+// (media_kit's Worker: a plain FIFO — nothing coalesced, nothing
+// dropped; each render blocks to its frame's target time, so the
+// queue drains at the frame rate). The renderer enqueues sample
+// buffers to the display layer directly from that queue —
+// AVSampleBufferDisplayLayer is fed from decode threads by
 // design — so no CMSampleBuffer ever crosses a Swift isolation
 // boundary. The only hop out is the void first-frame callback.
 
@@ -205,7 +208,6 @@ final class MpvGLRenderer {
     private nonisolated(unsafe) var renderContext: OpaquePointer?
     private nonisolated(unsafe) var renderCallbackToken: UnsafeMutableRawPointer?
     private let glQueue = DispatchQueue(label: "live.mpv.gl", qos: .userInitiated)
-    private nonisolated(unsafe) var renderPending = false
     private nonisolated(unsafe) var slots: [GLFrameSlot] = []
     private nonisolated(unsafe) var slotIndex = 0
     private nonisolated(unsafe) var videoSize: CGSize = .zero
@@ -296,11 +298,20 @@ final class MpvGLRenderer {
 
     // MARK: - Render (GL queue)
 
-    /// Called from libmpv's render thread. Coalesced: one pending
-    /// render at a time (a torn read only costs one extra frame).
+    /// Called from libmpv's render thread when a new frame is
+    /// available. Every update enqueues a render on the GL queue —
+    /// media_kit's Worker does exactly this (a plain FIFO, nothing
+    /// coalesced or dropped). Build 17 had a `renderPending` guard
+    /// here that dropped the updates for frames decoded while a
+    /// render was blocked waiting for a future frame's target time,
+    /// so those frames were never rendered and mpv counted them as
+    /// dropped (frame-drop-count 527 on chen's build-17 screenshot,
+    /// decoder videotoolbox, buffer full, download keeping up).
+    /// Each queued render blocks to its frame's target time, so
+    /// renders drain at the frame rate, in order — no burst, no
+    /// stall, no dropped updates.
     func renderUpdateRequested() {
-        guard !renderPending, !tornDown else { return }
-        renderPending = true
+        guard !tornDown else { return }
         glQueue.async { [weak self] in self?.renderFrame() }
     }
 
@@ -340,7 +351,6 @@ final class MpvGLRenderer {
     /// Runs on the GL queue. Renders one frame into the next slot's
     /// FBO and enqueues its pixel buffer to the display layer.
     private func renderFrame() {
-        defer { renderPending = false }
         guard !tornDown, let renderCtx = renderContext else { return }
         guard !slots.isEmpty else {
             // Video size known but no slots: the GPU path is dead.
