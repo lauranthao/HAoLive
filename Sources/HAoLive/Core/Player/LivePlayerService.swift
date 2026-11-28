@@ -561,17 +561,26 @@ final class LivePlayerService: ObservableObject {
             } else {
                 decoded = "\(base) · \(decode)"
             }
-            // Buffer state (build 14): a stall for data must read
-            // as one on the pill — it leads the string so the 140pt
-            // pill shows it even truncated; otherwise the buffered
-            // seconds ride at the end (the full text is in the
-            // header ••• menu).
+            // Build 15: Pure Live's stall diagnostics on the tag —
+            // download speed (cache-speed) and dropped frames
+            // (frame-drop-count, else decoder-frame-drop-count).
+            // A 30M line needs 3.75 MB/s sustained; below that the
+            // feed is starving. Drops climbing with a full cache
+            // point at render/decode instead. The stalled case
+            // stays bare so the pill reads "等缓冲" at a glance.
             if mpv.pausedForCache {
                 return "等缓冲 · \(decoded)"
             }
+            var tail = ""
             let seconds = Int(mpv.cacheDuration)
-            guard seconds > 0 else { return decoded }
-            return "\(decoded) · 缓\(seconds)s"
+            if seconds > 0 { tail += " · 缓\(seconds)s" }
+            let mbps = mpv.downloadBytesPerSecond / 1_000_000
+            if mbps > 0 { tail += String(format: " · ↓%.1fMB/s", mbps) }
+            let dropped = mpv.rendererDroppedFrames >= 0
+                ? mpv.rendererDroppedFrames
+                : mpv.decoderDroppedFrames
+            if dropped > 0 { tail += " · 丢帧\(dropped)" }
+            return decoded + tail
         }
         #endif
         return engine.name

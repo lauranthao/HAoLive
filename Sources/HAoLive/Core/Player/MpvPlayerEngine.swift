@@ -102,6 +102,22 @@ import UIKit
     nonisolated(unsafe) var cacheDuration: Double = 0
     nonisolated(unsafe) var pausedForCache: Bool = false
 
+    /// Pure Live's stall diagnostics (buffering_probe.dart /
+    /// playback_stats.dart), ported to the tag in build 15:
+    /// `cache-speed` (bytes/s mpv actually reads — the throughput
+    /// number: a 30M line needs 3.75 MB/s sustained) and the frame
+    /// drops (`frame-drop-count`, renderer, else
+    /// `decoder-frame-drop-count`). -1 = property never reported.
+    /// (userdata 6/7/8.)
+    nonisolated(unsafe) var downloadBytesPerSecond: Double = 0
+    nonisolated(unsafe) var rendererDroppedFrames: Int = -1
+    nonisolated(unsafe) var decoderDroppedFrames: Int = -1
+
+    /// Last tag refresh (event-loop thread only): the tag updates
+    /// at most once a second, except a stall flip, which is
+    /// immediate.
+    nonisolated(unsafe) private var lastTagNotify: TimeInterval = 0
+
     /// A presented-frame stall marks the mpv engine unusable
     /// (canPlay false) so the sweep does not retry the same dead
     /// GPU path on the next candidate. The service recreates the
@@ -536,6 +552,19 @@ import UIKit
         "paused-for-cache".withCString { name in
             _ = mpv_observe_property(handle, 5, name, MPV_FORMAT_FLAG)
         }
+        // Build 15: Pure Live's stall diagnostics — cache-speed
+        // (bytes/s actually read, userdata 6), frame-drop-count
+        // (renderer drops, userdata 7) and decoder-frame-drop-count
+        // (decoder drops, userdata 8).
+        "cache-speed".withCString { name in
+            _ = mpv_observe_property(handle, 6, name, MPV_FORMAT_DOUBLE)
+        }
+        "frame-drop-count".withCString { name in
+            _ = mpv_observe_property(handle, 7, name, MPV_FORMAT_INT64)
+        }
+        "decoder-frame-drop-count".withCString { name in
+            _ = mpv_observe_property(handle, 8, name, MPV_FORMAT_INT64)
+        }
     }
 
     /// Called on libmpv's render thread when a new frame is available.
@@ -728,8 +757,13 @@ import UIKit
     /// Cache state changed (whole-second bucket or stall flip):
     /// tell the service so the on-screen tag refreshes. Hops to
     /// the main actor like the other delegate calls from this
-    /// thread (see the error path below).
-    nonisolated private func notifyCacheStateChanged() {
+    /// thread (see the error path below). Throttled to once a
+    /// second — cache-speed moves constantly — except a stall
+    /// flip, which is immediate.
+    nonisolated private func notifyCacheStateChanged(immediate: Bool = false) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if !immediate, now - lastTagNotify < 1.0 { return }
+        lastTagNotify = now
         Task { @MainActor in self.delegate?.engineCacheStateDidChange(self) }
     }
 
@@ -760,12 +794,45 @@ import UIKit
             return
         }
         // paused-for-cache (userdata 5) is a flag (int 0/1): mpv
-        // has paused playback waiting for data. Notify on flip.
+        // has paused playback waiting for data. Notify on flip,
+        // immediately — a stall is the one reading that must not
+        // wait for the throttle.
         if event.reply_userdata == 5 {
             guard property.format == MPV_FORMAT_FLAG, let valuePtr = property.data else { return }
             let value = valuePtr.assumingMemoryBound(to: Int.self).pointee != 0
             guard value != pausedForCache else { return }
             pausedForCache = value
+            notifyCacheStateChanged(immediate: true)
+            return
+        }
+        // cache-speed (userdata 6) is a double: bytes/s mpv
+        // actually reads from the stream. A 30M line needs
+        // 3.75 MB/s sustained — below that the feed, not the
+        // renderer, is starving. Throttled notify.
+        if event.reply_userdata == 6 {
+            guard property.format == MPV_FORMAT_DOUBLE, let valuePtr = property.data else { return }
+            downloadBytesPerSecond = max(0, valuePtr.assumingMemoryBound(to: Double.self).pointee)
+            notifyCacheStateChanged()
+            return
+        }
+        // frame-drop-count (userdata 7) and
+        // decoder-frame-drop-count (userdata 8) are int64s:
+        // cumulative frames dropped by the renderer and by the
+        // decoder. Notify on a new drop — a climbing count with a
+        // full cache is the render/decode side, not the feed.
+        if event.reply_userdata == 7 {
+            guard property.format == MPV_FORMAT_INT64, let valuePtr = property.data else { return }
+            let value = Int(valuePtr.assumingMemoryBound(to: Int64.self).pointee)
+            guard value != rendererDroppedFrames else { return }
+            rendererDroppedFrames = value
+            notifyCacheStateChanged()
+            return
+        }
+        if event.reply_userdata == 8 {
+            guard property.format == MPV_FORMAT_INT64, let valuePtr = property.data else { return }
+            let value = Int(valuePtr.assumingMemoryBound(to: Int64.self).pointee)
+            guard value != decoderDroppedFrames else { return }
+            decoderDroppedFrames = value
             notifyCacheStateChanged()
             return
         }

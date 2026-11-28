@@ -7,9 +7,11 @@ HAo Live — 直播应用，参照 Pure Live 的**功能**，界面与实现均�
 - 平台：iOS 17+，Swift 6，SwiftUI，mpv 单一播放器（MPVKit 1.1.0-n9.0.2，FLV 走 mpv session 内拼接；无系统播放器兜底、无内核切换）
 - 无强制登录；收藏与历史只存本机
 - 无启动动画：进应用直接到主界面
-- 当前版本：0.1.0 build 14（2026-11-28）
+- 当前版本：0.1.0 build 15（2026-11-28）
 
 ## 版本历史
+
+- **0.1.0 build 15（2026-11-28）：** 按 Pure Live 的写法，把它自己的卡顿诊断（buffering_probe.dart / playback_stats.dart）做到 tag 上：下载速度（cache-speed，蓝光 30M 需要 3.75 MB/s 持续）和丢帧数（frame-drop-count，渲染丢的；没有时看 decoder-frame-drop-count，解码丢的）。tag 刷新最多一秒一次，等缓冲翻转立刻显示。这一版只加诊断，不改播放——下次卡，那行字直接写明是网跟不上还是帧在丢。
 
 - **0.1.0 build 14（2026-11-28）：** build 13 没解决卡——chen 真机截图证明 tag 已是 `mpv (GL) · videotoolbox`，渲染和硬解都没问题，方向找错了。这一版改查缓冲那层：播放器 tag 加上缓冲状态（等缓冲时打头显示，平时显示缓冲秒数）；mpv 缓冲从 wzgrx 的 6 秒/32MB 加到 12 秒/64MB（蓝光 30M 下 6 秒只够 22.5MB，网速一抖就断流）。mpv 其他选项仍与 wzgrx 一致（对照 mpv_options.dart 核过，media_kit 不另加缓冲设置）。
 
