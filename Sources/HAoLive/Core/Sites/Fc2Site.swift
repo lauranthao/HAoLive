@@ -53,12 +53,12 @@ final class Fc2Site: LiveSite, @unchecked Sendable {
     /// and the room view closes it on exit.
 #if !os(Linux)
     private let controlLock = NSLock()
-    private var heldControl: Fc2Control?
+    private var heldControl: Fc2ControlSession.Fc2Control?
 #endif
 
     func endPlaybackSession() {
 #if !os(Linux)
-        let control: Fc2Control? = {
+        let control: Fc2ControlSession.Fc2Control? = {
             controlLock.lock()
             defer { controlLock.unlock() }
             let control = heldControl
@@ -216,8 +216,8 @@ final class Fc2Site: LiveSite, @unchecked Sendable {
     /// it already announced, no new grant), else a fresh grant +
     /// control — the old one is closed first (ref: a control
     /// never reconnects with a used grant).
-    private func heldControl(for channelID: String) async throws -> Fc2Control {
-        let existing: Fc2Control? = {
+    private func heldControl(for channelID: String) async throws -> Fc2ControlSession.Fc2Control {
+        let existing: Fc2ControlSession.Fc2Control? = {
             controlLock.lock()
             defer { controlLock.unlock() }
             return heldControl
@@ -227,7 +227,7 @@ final class Fc2Site: LiveSite, @unchecked Sendable {
         }
         existing?.close()
         let grant = try await Fc2ControlSession.controlGrant(channelID: channelID, http: http)
-        let fresh = try await Fc2Control.open(grant: grant)
+        let fresh = try await Fc2ControlSession.Fc2Control.open(grant: grant)
         controlLock.lock()
         heldControl = fresh
         controlLock.unlock()
