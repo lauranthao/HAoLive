@@ -31,6 +31,11 @@ enum BigoDanmaku {
     static let accountURL = "https://ta.bigo.tv/official_website/studio/getWebSocketLink"
     static let pingIntervalSeconds: UInt64 = 10
 
+    /// Mutable flag shared between the receive loop and the ping task.
+    /// A single-word Bool; the race window (a ping sent before the
+    /// join reply lands) is benign — the server ignores it.
+    private final class JoinedFlag: @unchecked Sendable { var value = false }
+
     /// Split one "<event><json>" frame. Pure function.
     static func splitEvent(_ raw: String) -> (event: Int, payload: JSONValue)? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -139,7 +144,11 @@ enum BigoDanmaku {
                 let socket = URLSession.shared.webSocketTask(with: request)
                 socket.resume()
                 var loggedIn = false
-                var joined = false
+                // Shared with the ping task below: a plain `var` captured
+                // by an inner Task is a Swift 6 data-race error, so the
+                // flag lives in a Sendable box (same pattern as
+                // Kilakila JoinBox / SixRoom LoggedInFlag).
+                let joinedFlag = JoinedFlag()
                 var answeredChallenge = false
                 var lastChallengeSuffix = ""
                 func send(event: Int, fields: [String: Any]) async {
@@ -150,7 +159,7 @@ enum BigoDanmaku {
                 let ping = Task {
                     while !Task.isCancelled {
                         try? await Task.sleep(for: .seconds(Int(pingIntervalSeconds)))
-                        if joined {
+                        if joinedFlag.value {
                             await send(event: 791, fields: [
                                 "status": "0",
                                 "seqid": Int(Date().timeIntervalSince1970 * 1000),
@@ -196,8 +205,8 @@ enum BigoDanmaku {
                             loggedIn = true
                             await send(event: 1304, fields: enterRoomFields(roomID: roomID, deviceID: deviceID))
                         case 1304:
-                            guard !joined else { continue }
-                            joined = true
+                            guard !joinedFlag.value else { continue }
+                            joinedFlag.value = true
                             await send(event: 10776, fields: [
                                 "uid": ownerID,
                                 "seqId": Int(Date().timeIntervalSince1970 * 1000),

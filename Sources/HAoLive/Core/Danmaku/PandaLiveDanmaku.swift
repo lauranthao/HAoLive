@@ -116,8 +116,11 @@ enum PandaLiveDanmaku {
             // Connect commands: token first, then the channel.
             try await socket.send(Data(connectCommands(token: token, channel: channel)[0].utf8))
             try await socket.send(Data(connectCommands(token: token, channel: channel)[1].utf8))
-            var nextID = 2
             let ping = Task {
+                // The counter is owned by this task alone (no mutable
+                // state shared with the receive loop) — same pattern
+                // as ChzzkDanmaku's pingTid.
+                var nextID = 2
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(Int(pingIntervalSeconds)))
                     nextID += 1
