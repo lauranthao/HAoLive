@@ -300,7 +300,7 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
             params: params)
         guard let json = try? await http.getJSON(url, headers: await Self.requestHeaders()),
               json["status_code"].intValue == 0 else { return [] }
-        return json["data"]["data"].arrayValue.compactMap(Self.room(fromCategoryItem:))
+        return json["data"]["data"].arrayValue.compactMap { Self.room(fromCategoryItem: $0) }
     }
 
     // MARK: - Search
@@ -313,9 +313,19 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
         try await search(keyword: keyword)
     }
 
+    /// Douyin web search: the aweme search first, then Pure Live's
+    /// partition-search fallback (douyin_site.dart:377-495). The
+    /// anonymous aweme search answers 2483 (login required), so
+    /// without the fallback search is always 0 results.
+    private func search(keyword: String) async throws -> [LiveRoom] {
+        let rooms = try await searchAweme(keyword: keyword)
+        if !rooms.isEmpty { return rooms }
+        return try await searchByPartition(keyword: keyword)
+    }
+
     /// Douyin web search. Unverified from this VM (the aweme search
     /// API needs a signature); parsed defensively, returns [] on failure.
-    private func search(keyword: String) async throws -> [LiveRoom] {
+    private func searchAweme(keyword: String) async throws -> [LiveRoom] {
         let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
         let url = "https://www.douyin.com/aweme/v1/web/search/item/?device_platform=webapp&aid=6383&keyword=\(encoded)&search_source=tab_search&count=10"
         guard let json = try? await http.getJSON(url, headers: ["Referer": "https://www.douyin.com/"]) else {
@@ -339,6 +349,121 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
                 isLive: true
             )
         }
+    }
+
+    /// Pure Live's _searchByPartition (douyin_site.dart:436-466):
+    /// the partitions whose name matches the keyword, first 3, each
+    /// contributing rooms until 10 are merged (deduped by room id).
+    /// A partition that fails is skipped; an empty merge is [].
+    private func searchByPartition(keyword: String) async throws -> [LiveRoom] {
+        let areas = try await partitionSearch(keyword: keyword)
+        var merged: [LiveRoom] = []
+        var seen: Set<String> = []
+        for area in areas.prefix(3) {
+            let rooms = (try? await searchPartitionRooms(
+                areaID: area.id, areaName: area.name, count: 10, offset: 0)) ?? []
+            for room in rooms {
+                guard seen.insert(room.roomID).inserted else { continue }
+                merged.append(room)
+                if merged.count >= 10 { return merged }
+            }
+        }
+        return merged
+    }
+
+    /// Pure Live's _partitionSearch (douyin_site.dart:428-434): the
+    /// partitions whose name matches the keyword (anonymous), as
+    /// "id_str,type" ids — the same id shape categories use.
+    private func partitionSearch(keyword: String) async throws -> [(id: String, name: String)] {
+        let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
+        let url = "\(Self.webBase)/webcast/web/partition/search/?keyword=\(encoded)&aid=6383"
+        let cookie = await Self.requestHeaders()["Cookie"] ?? ""
+        guard let json = try? await http.getJSON(url, headers: Self.searchHeaders(keyword: keyword, cookie: cookie)),
+              json["status_code"].intValue == 0 else { return [] }
+        return json["data"]["SearchResult"].arrayValue.compactMap { item in
+            let partition = item["partition"]
+            guard let id = partition["id_str"].stringValue, !id.isEmpty,
+                  let type = partition["type"].stringValue, !type.isEmpty else { return nil }
+            return (id: "\(id),\(type)", name: partition["title"].stringValue ?? "")
+        }
+    }
+
+    /// Pure Live's _searchPartitionRooms (douyin_site.dart:469-495):
+    /// one matched partition's rooms — signed live.douyin.com first,
+    /// then the unsigned webcast.amemv.com host when that fails or
+    /// is empty. Rooms without a tag show the partition's name.
+    private func searchPartitionRooms(areaID: String, areaName: String, count: Int, offset: Int) async throws -> [LiveRoom] {
+        let (partition, partitionType) = Self.partition(from: "douyin-\(areaID)")
+        let params = Self.searchPartitionParams(partition: partition, type: partitionType, count: count, offset: offset)
+        let cookie = await Self.requestHeaders()["Cookie"] ?? ""
+        let headers = Self.searchHeaders(keyword: "", cookie: cookie)
+        let url = DouyinURLSigning.signedURL(
+            base: "\(Self.webBase)/webcast/web/partition/detail/room/v2/",
+            params: params)
+        if let json = try? await http.getJSON(url, headers: headers),
+           json["status_code"].intValue == 0 {
+            let rooms = json["data"]["data"].arrayValue.compactMap {
+                Self.room(fromCategoryItem: $0, areaName: areaName)
+            }
+            if !rooms.isEmpty { return rooms }
+        }
+        return try await amemvRooms(
+            partition: partition, type: partitionType, areaName: areaName,
+            count: count, offset: offset, cookie: cookie)
+    }
+
+    /// Pure Live's _amemvRooms (douyin_site.dart:276-294): the same
+    /// partition room list from the unsigned backup host.
+    private func amemvRooms(partition: String, type: String, areaName: String, count: Int, offset: Int, cookie: String) async throws -> [LiveRoom] {
+        let params = Self.searchPartitionParams(partition: partition, type: type, count: count, offset: offset)
+        let query = params.map { "\($0.0)=\($0.1)" }.joined(separator: "&")
+        let url = "https://webcast.amemv.com/webcast/web/partition/detail/room/v2/?\(query)"
+        guard let json = try? await http.getJSON(url, headers: Self.searchHeaders(keyword: "", cookie: cookie)),
+              json["status_code"].intValue == 0 else { return [] }
+        return json["data"]["data"].arrayValue.compactMap {
+            Self.room(fromCategoryItem: $0, areaName: areaName)
+        }
+    }
+
+    /// Pure Live's _searchPartitionParams (douyin_site.dart:296-318)
+    /// + DouyinApi.searchHeaders (douyin_api.dart:576-590).
+    static func searchPartitionParams(partition: String, type: String, count: Int, offset: Int) -> [(String, String)] {
+        [
+            ("aid", "6383"),
+            ("app_name", "douyin_web"),
+            ("live_id", "1"),
+            ("device_platform", "web"),
+            ("language", "zh-CN"),
+            ("browser_language", "zh-CN"),
+            ("browser_platform", "Win32"),
+            ("browser_name", "Chrome"),
+            ("browser_version", "120.0.0.0"),
+            ("partition", partition),
+            ("partition_type", type),
+            ("count", "\(count)"),
+            ("offset", "\(offset)"),
+            ("cookie_enabled", "true"),
+            ("screen_width", "1920"),
+            ("screen_height", "1080"),
+        ]
+    }
+
+    /// Headers of the search requests: the web client's search page
+    /// as the Referer (an empty keyword for the partition rooms).
+    static func searchHeaders(keyword: String, cookie: String) -> [String: String] {
+        let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
+        var headers: [String: String] = [
+            "User-Agent": ABogus.defaultUserAgent,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Referer": "https://www.douyin.com/search/\(encoded)?source=switch_tab&type=live",
+            "Origin": "https://www.douyin.com",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        ]
+        if !cookie.isEmpty { headers["Cookie"] = cookie }
+        return headers
     }
 
     // MARK: - Room detail
@@ -528,17 +653,26 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
         return html
     }
 
+    /// wzgrx DouyinApi.isRoomId: digits only, 17 or more. Anything
+    /// else is a web_rid (the room's lasting identity) — a long
+    /// alphanumeric id must NOT be sent to reflow.
+    static func isRoomID(_ id: String) -> Bool {
+        let trimmed = id.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count >= 17 else { return false }
+        return trimmed.allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
     /// roomStore.roomInfo for a web_rid. The room page embeds
     /// roomStore twice — an empty initial store, then the hydrated
     /// one — so the first populated copy wins; a page whose store
     /// never hydrates has no room to show. Pure Live dispatches by
-    /// id length (douyin_site.dart:422-428): <= 16 chars is a
-    /// web_rid (enter API, then HTML), longer is the 19-digit
-    /// internal id (reflow/info API).
+    /// id shape (douyin_api.dart:99, isRoomId): digits-only 17+ is
+    /// the 19-digit internal id (reflow/info API), anything else is
+    /// a web_rid (enter API, then HTML).
     private func roomInfo(for roomID: String) async throws -> JSONValue {
         if let cached = Self.cachedRoomInfo(for: roomID) { return cached }
         let info: JSONValue
-        if roomID.count > 16 {
+        if Self.isRoomID(roomID) {
             // 19-digit internal id (the ids feed/category return):
             // reflow/info — Pure Live's ByRoomId route. The room
             // page cannot serve these ids.
@@ -591,12 +725,15 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
     /// Signed enter API — Pure Live's primary ByWebRid route
     /// (douyin_site.dart:680-692, signed via buildRequestUrl = the
     /// same a_bogus signing as the category API). Returns the
-    /// roomInfo-shaped object. From this VM the API answers HTTP
-    /// 200 with an EMPTY body — an egress-IP artifact, not a
-    /// signing bug (signing verified 2/2 in build 9) — so on this
-    /// VM it always falls through to the HTML route; on a China
-    /// IP it is the primary path. Kept because Pure Live proves
-    /// it works there.
+    /// roomInfo-shaped object. The room is data.data[0] (data itself
+    /// is an object, not the list — douyin_api.dart:359-383); the
+    /// streamer is data.user when the room is offline, room.owner
+    /// when live. room_status is passed through so room() can decide
+    /// liveness when room.status is missing. Verified 2026-11-28:
+    /// the enter/feed/partition APIs answer from this VM now (the
+    /// old "empty body" note was an egress-IP artifact of that time);
+    /// on a China IP it is the primary path. Kept because Pure Live
+    /// proves it works there.
     private func roomInfoFromEnter(webRID: String) async throws -> JSONValue {
         let params: [(String, String)] = [
             ("app_name", "douyin_web"),
@@ -607,14 +744,19 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
         ]
         let url = DouyinURLSigning.signedURL(base: "https://live.douyin.com/webcast/room/web/enter/", params: params)
         guard let json = try? await http.getJSON(url, headers: await Self.requestHeaders()),
-              !json["data"][0].isNull else {
+              json["status_code"].intValue == 0,
+              !json["data"]["data"][0].isNull else {
             throw LiveSiteError.roomNotFound(webRID)
         }
-        let room = json["data"][0]
+        let data = json["data"]
+        let room = data["data"][0]
+        let live = room["status"].intValue == 2
+        let anchor = live ? room["owner"] : (!data["user"].isNull ? data["user"] : room["owner"])
         return .object([
             "room": room,
-            "anchor": room["owner"],
+            "anchor": anchor,
             "web_stream_url": room["stream_url"],
+            "room_status": data["room_status"],
         ])
     }
 
@@ -655,8 +797,17 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
             coverURL: Self.imageURL(firstImageURL([room["cover"]])),
             categoryName: nil,
             viewerCount: Int(room["user_count_str"].stringValue ?? "") ?? room["user_count"].intValue ?? 0,
-            isLive: room["status"].intValue == 2
+            isLive: Self.isLive(room: room, roomStatus: info["room_status"])
         )
+    }
+
+    /// wzgrx DouyinApi._isLive (douyin_api.dart:526-530): status 2 is
+    /// live, any other present status is offline; a missing status
+    /// defers to room_status (0 live, 2 ended). Without either the
+    /// room is offline.
+    static func isLive(room: JSONValue, roomStatus: JSONValue) -> Bool {
+        if let status = room["status"].intValue { return status == 2 }
+        return roomStatus.intValue == 0
     }
 
     /// Pure parser for the /webcast/feed/ response — both generations.
@@ -703,14 +854,17 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
 
     /// Pure parser for one item of the v2 partition room list
     /// (data.data): room under "room", web_rid + tag_name at item level.
+    /// The area is tag_name, else areaName (the amemv host leaves
+    /// tag_name empty) — wzgrx DouyinApi.partitionRooms.
     /// Testable without the network.
-    static func room(fromCategoryItem item: JSONValue) -> LiveRoom? {
+    static func room(fromCategoryItem item: JSONValue, areaName: String? = nil) -> LiveRoom? {
         let room = item["room"]
         guard !room.isNull else { return nil }
         let roomID = firstText([item["web_rid"], room["web_rid"], room["id_str"]])
         guard !roomID.isEmpty else { return nil }
         let owner = room["owner"]
         let tag = item["tag_name"].stringValue
+        let area = !(tag ?? "").isEmpty ? tag : ((areaName ?? "").isEmpty ? nil : areaName)
         return LiveRoom(
             id: "douyin-\(roomID)",
             platform: .douyin,
@@ -719,7 +873,7 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
             anchorName: owner["nickname"].stringValue ?? "",
             anchorAvatarURL: Self.imageURL(owner["avatar_thumb"]["url_list"][0].stringValue),
             coverURL: Self.imageURL(room["cover"]["url_list"][0].stringValue),
-            categoryName: (tag ?? "").isEmpty ? nil : tag,
+            categoryName: area,
             viewerCount: onlineViewers(room),
             isLive: true
         )

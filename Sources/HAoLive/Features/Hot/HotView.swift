@@ -99,8 +99,11 @@ struct HotView: View {
     }
 
     /// One page across the selected platforms, in parallel.
-    /// Platforms keep their order (index-tagged task group); results
-    /// merge in platform order, deduped by anchor + title.
+    /// Platforms keep their order (index-tagged task group);
+    /// results merge round-robin (RoomSearchMerger
+    /// .mergeInterleaved), so every platform's rooms show near
+    /// the top instead of the first platforms' whole pages
+    /// burying the rest; deduped by anchor + title.
     /// Returns the rooms plus whether EVERY platform errored (so the
     /// UI can tell "no more pages" apart from "network failed").
     private func loadPage(_ page: Int) async -> ([LiveRoom], Bool) {
@@ -117,7 +120,7 @@ struct HotView: View {
         }
         let allFailed = perPlatform.allSatisfy { $0 == nil }
         let lists = perPlatform.map { $0 ?? [] }
-        return (RoomSearchMerger.merge(lists), allFailed)
+        return (RoomSearchMerger.mergeInterleaved(lists), allFailed)
     }
 
     private func load(reset: Bool) async {

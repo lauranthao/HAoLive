@@ -237,6 +237,14 @@ final class MpvGLRenderer {
     /// callback resolves GL symbols from the com.apple.opengles
     /// bundle, exactly as media_kit's TextureHW does.
     private func createRenderContext() -> Bool {
+        // media_kit's TextureHW.initMPV makes the EAGL context
+        // current before mpv_render_context_create: libmpv resolves
+        // GL entry points against the current context, and without
+        // one the create call fails on device (build 12 tag
+        // "GL失败： mpv_render_context_create 失败…") so every room
+        // falls back to the SW renderer — the "卡爆了".
+        EAGLContext.setCurrent(context)
+        defer { EAGLContext.setCurrent(nil) }
         // The get_proc_address closure cannot capture (it becomes a
         // C function pointer), so the bundle check happens up front
         // instead of inside it — a missing bundle used to fail
@@ -425,6 +433,10 @@ final class MpvGLRenderer {
         glQueue.sync { [self] in
             guard !tornDown else { return }
             tornDown = true
+            // media_kit's TextureHW.disposeMPV: the EAGL context
+            // must be current while the render context is freed.
+            EAGLContext.setCurrent(self.context)
+            defer { EAGLContext.setCurrent(nil) }
             if let context = renderContext {
                 mpv_render_context_set_update_callback(context, nil, nil)
                 mpv_render_context_free(context)

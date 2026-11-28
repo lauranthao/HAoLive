@@ -13,8 +13,13 @@ import Foundation
 
 /// Playback headers per platform (Pure Live's policy, verbatim).
 enum PlaybackHeaders {
-    /// Desktop Chrome UA (Douyin playback; Pure Live's resolver).
+    /// Desktop Chrome UA (generic playback fallback; Pure Live's resolver).
     static let desktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+    /// Douyin playback UA — Chrome/134, the same UA as the API
+    /// requests (ABogus.defaultUserAgent; wzgrx DouyinApi.userAgent:
+    /// "Desktop Chrome 134, the UA of 3.x's API requests, the one
+    /// a_bogus encodes"). Playback previously sent Chrome/140.
+    static let douyinUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
     /// macOS Chrome UA (Kuaishou playback; Pure Live's resolver).
     static let macUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
     /// Bilibili's playback UA (BiliBiliSite.kDefaultUserAgent).
@@ -53,7 +58,7 @@ enum PlaybackHeaders {
             ]
         case .douyin:
             headers = [
-                "user-agent": desktopUA,
+                "user-agent": douyinUA,
                 "origin": "https://live.douyin.com",
                 "referer": "https://live.douyin.com/\(roomID)",
             ]
