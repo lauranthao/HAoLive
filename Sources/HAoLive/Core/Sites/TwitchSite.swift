@@ -13,7 +13,9 @@
 //               (id "twitch-<slug>"); the tag tree Pure Live builds
 //               (SearchCategoryTags -> per-tag BrowsePage) is flattened
 //               away, not dropped — the same games come back.
-//   recommend   DirectoryPage_Game slug "just-chatting" (see below).
+//   recommend   Raw `streams` query (the site's busiest streams,
+//               first 30) — wzgrx 4.x changed this from the Just
+//               Chatting directory (8-3).
 //   directory   POST gql  DirectoryPage_Game (hash 76cb069d…,
 //               slug + VIEWER_COUNT + cursor paging) ->
 //               data.game.streams.edges[].node {title, viewersCount,
@@ -24,19 +26,18 @@
 //               .item {login, displayName, profileImageURL,
 //               broadcastSettings.title, followers.totalCount,
 //               stream{viewersCount, previewImageURL, game}}
-//   detail      batched POST gql  [ChannelShell (fea4573a…),
-//               StreamMetadata (b57f9b91…)] -> userOrError
-//               {displayName, profileImageURL, stream.viewersCount}
-//               + user {stream{type, createdAt, game},
-//               lastBroadcast.title}. NOTE (verified live): the
-//               StreamMetadata stream carries NO viewersCount and NO
-//               previewImageURL — viewers come from the ChannelShell
-//               stream, the title from lastBroadcast, and the cover
-//               falls back to the profile image when offline.
+//   detail      Raw `user` query (one POST gql, NOT the old
+//               ChannelShell + StreamMetadata batch — wzgrx 4.x
+//               replaced the pair because StreamMetadata's stream
+//               carries NO viewersCount and NO previewImageURL) ->
+//               user {displayName, profileImageURL,
+//               stream{type, viewersCount, previewImageURL, game},
+//               lastBroadcast.title}. The cover falls back to the
+//               profile image when offline.
 //   play        POST gql  PlaybackAccessToken (ed230aa1…,
 //               {isLive:true, login, playerType:"site"}) ->
 //               value + signature -> GET usher.ttvnw.net/api/channel/
-//               hls/{login}.m3u8?sig=&token=&allow_source=true… ->
+//               hls/{login}.m3u8?sig=&token=&allow_source=true&supported_codecs=h264… ->
 //               master m3u8; each #EXT-X-STREAM-INF + following URI is
 //               one quality (VIDEO="chunked" is source/原画). Variant
 //               URLs are absolute https and carry their own signing
@@ -90,6 +91,20 @@ final class TwitchSite: LiveSite, @unchecked Sendable {
     private static let hashStreamMetadata = "b57f9b910f8cd1a4659d894fe7550ccc81ec9052c01e438b290fd66a040b9b93"
     private static let hashPlaybackAccessToken = "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9"
 
+    /// The raw `user` query for a channel (Pure Live's
+    /// TwitchApi.userQuery — it replaces the ChannelShell +
+    /// StreamMetadata pair, whose viewersCount stopped being
+    /// filled). Copied verbatim.
+    private static let userQuery = """
+        query($login: String!) { user(login: $login) { id login displayName description profileImageURL(width: 300) stream { id title type viewersCount createdAt previewImageURL(width: 640, height: 360) restriction { type } game { id name displayName slug } } lastBroadcast { title game { name displayName } } } }
+        """
+    /// The raw `streams` query for the site's busiest live streams
+    /// (Pure Live's TwitchApi.streamsQuery — there is no persisted
+    /// query for it). Copied verbatim.
+    private static let streamsQuery = """
+        query($first: Int!, $after: Cursor, $languages: [Language!]) { streams(first: $first, after: $after, options: {broadcasterLanguages: $languages}) { edges { cursor node { id title type viewersCount createdAt previewImageURL(width: 440, height: 248) restriction { type } broadcaster { id login displayName profileImageURL(width: 70) } game { id name displayName slug } } } pageInfo { hasNextPage } } }
+        """
+
     private static let playSessionIDs = ["bdd22331a986c7f1073628f2fc5b19da", "064bc3ff1722b6f53b0b5b8c01e46ca5"]
 
     /// One random 32-hex Device-Id per site instance (Pure Live's
@@ -111,7 +126,9 @@ final class TwitchSite: LiveSite, @unchecked Sendable {
     private func gqlHeaders() -> [String: String] {
         var headers: [String: String] = [
             "User-Agent": Self.chromeUA,
-            "Accept-Language": "en-US,en;q=0.9",
+            // Pure Live's acceptLanguage: Chinese names for category
+            // tags, directories and games (3.x asked for en-US).
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Accept": "application/vnd.twitchtv.v5+json",
             "Client-ID": Self.clientID,
             "Device-Id": deviceID,
@@ -203,6 +220,11 @@ final class TwitchSite: LiveSite, @unchecked Sendable {
         if !response.arrayValue.isEmpty {
             return response.arrayValue.contains { hasIntegrityError($0) }
         }
+        // Pure Live's isIntegrityRejection also counts an
+        // extensions.challenge — the old code only read errors[].
+        if !response["extensions"]["challenge"].isNull {
+            return true
+        }
         for error in response["errors"].arrayValue {
             let message = (error["message"].stringValue ?? "").lowercased()
             if message.contains("failed integrity check") || message.contains("integrity token") {
@@ -286,10 +308,30 @@ final class TwitchSite: LiveSite, @unchecked Sendable {
         try await recommendRooms(page: 1)
     }
 
-    /// Recommended = the Just Chatting directory (Pure Live's
-    /// getRecommendRooms).
+    /// Recommended = the site's busiest live streams (Pure Live's
+    /// getRecommendRooms, 8-3: the raw `streams` query, 30 at a
+    /// time). The old code used the Just Chatting directory — that
+    /// was 3.x; wzgrx 4.x changed the recommendations to streams.
+    /// Later pages need a browser integrity token (per the query's
+    /// own comment), so page 1 is the reliable one.
     func recommendRooms(page: Int) async throws -> [LiveRoom] {
-        try await directoryRooms(slug: "just-chatting", page: page)
+        let cursor = cursor(for: "recommend", id: "", page: page)
+        if cursor.isEmpty && page > 1 { return [] }
+        var variables: [String: Any] = ["first": 30]
+        if !cursor.isEmpty { variables["after"] = cursor }
+        guard let body = try? JSONSerialization.data(
+            withJSONObject: ["query": Self.streamsQuery, "variables": variables], options: []
+        ) else { throw LiveSiteError.invalidResponse }
+        let response = try await gql(body)
+        guard let streams = Self.connection(response["data"]["streams"]) else {
+            if let message = Self.graphQLError(response) { throw LiveSiteError.message(message) }
+            return []
+        }
+        let edges = streams.edges
+        saveCursor(edges.last?["cursor"].stringValue ?? "", kind: "recommend", id: "", page: page, hasNextPage: streams.hasNextPage)
+        // A streams node carries the same fields room() reads
+        // (broadcaster, title, viewersCount, previewImageURL, game).
+        return edges.compactMap { Self.room(fromDirectoryNode: $0["node"]) }
     }
 
     func categoryRooms(_ category: LiveCategory) async throws -> [LiveRoom] {
@@ -394,14 +436,18 @@ final class TwitchSite: LiveSite, @unchecked Sendable {
         guard !trimmed.isEmpty else { return [] }
         let cursor = cursor(for: "search", id: trimmed, page: page)
         if cursor.isEmpty && page > 1 { return [] }
-        var variables: [String: Any] = [
+        let variables: [String: Any] = [
             "platform": "web",
             "query": trimmed,
-            "options": ["targets": NSNull(), "shouldSkipDiscoveryControl": false] as [String: Any],
+            // Pure Live's searchOperation: the continuation cursor
+            // goes in options.targets — a top-level "cursor" is
+            // ignored by the server, so the old code repeated page 1
+            // on every later page (3.x's bug, called out in
+            // twitch_site.dart 8-1).
+            "options": ["targets": cursor.isEmpty ? NSNull() : [["index": "CHANNEL", "cursor": cursor]], "shouldSkipDiscoveryControl": false] as [String: Any],
             "requestID": "808c9f2e-f52e-431c-8dc7-d2e3c1831d77",
             "includeIsDJ": true,
         ]
-        if !cursor.isEmpty { variables["cursor"] = cursor }
         guard let body = Self.persistedRequest(
             operation: "SearchResultsPage_SearchResults",
             hash: Self.hashSearchResults,
@@ -439,31 +485,56 @@ final class TwitchSite: LiveSite, @unchecked Sendable {
 
     func roomDetail(roomID: String) async throws -> LiveRoom {
         let login = roomID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !login.isEmpty else { throw LiveSiteError.roomNotFound(roomID) }
-        let shell = Self.persistedRequest(
-            operation: "ChannelShell",
-            hash: Self.hashChannelShell,
-            variables: ["login": login]
-        )
-        let meta = Self.persistedRequest(
-            operation: "StreamMetadata",
-            hash: Self.hashStreamMetadata,
-            variables: ["channelLogin": login, "includeIsDJ": true]
-        )
-        guard let shell, let meta,
-              let shellObj = try? JSONSerialization.jsonObject(with: shell, options: []),
-              let metaObj = try? JSONSerialization.jsonObject(with: meta, options: []),
-              let batch = try? JSONSerialization.data(withJSONObject: [shellObj, metaObj], options: [])
-        else { throw LiveSiteError.invalidResponse }
-        let response = try await gqlBatch(batch)
-        guard response.arrayValue.count >= 2 else { throw LiveSiteError.roomNotFound(roomID) }
-        guard let room = Self.room(fromDetailBatch: response, fallbackLogin: login) else {
+        // Pure Live's loginPattern: 1–25 of a-z 0-9 _.
+        guard login.range(of: #"^[a-z0-9_]{1,25}$"#, options: .regularExpression) != nil else {
+            throw LiveSiteError.roomNotFound(roomID)
+        }
+        guard let body = try? JSONSerialization.data(
+            withJSONObject: ["query": Self.userQuery, "variables": ["login": login]], options: []
+        ) else { throw LiveSiteError.invalidResponse }
+        let response = try await gql(body)
+        guard let room = Self.room(fromUserQuery: response, fallbackLogin: login) else {
             throw LiveSiteError.roomNotFound(roomID)
         }
         return room
     }
 
+    /// Pure parser for the raw `user` query (Pure Live's
+    /// TwitchApi.roomDetail): one request, and the stream finally
+    /// carries viewersCount + previewImageURL — the old
+    /// ChannelShell + StreamMetadata pair did not (see the file
+    /// header note). A rerun is playable but not live; HAoLive has
+    /// no replay state, so it reads as not-live here while
+    /// playURLs still serves it.
+    static func room(fromUserQuery response: JSONValue, fallbackLogin: String) -> LiveRoom? {
+        let user = response["data"]["user"]
+        guard !user.isNull else { return nil }
+        if let answered = user["login"].stringValue?.lowercased(), answered != fallbackLogin { return nil }
+        let stream = user["stream"]
+        let isLive = stream["type"].stringValue == "live"
+        let viewers = stream["viewersCount"].intValue ?? 0
+        let title = user["lastBroadcast"]["title"].stringValue ?? ""
+        let login = user["login"].stringValue ?? fallbackLogin
+        let avatar = user["profileImageURL"].stringValue
+        let game = stream["game"]["displayName"].stringValue ?? stream["game"]["name"].stringValue
+        let preview = stream["previewImageURL"].stringValue
+        return LiveRoom(
+            id: "twitch-\(login)",
+            platform: .twitch,
+            roomID: login,
+            title: title,
+            anchorName: user["displayName"].stringValue ?? login,
+            anchorAvatarURL: Self.imageURL(avatar),
+            coverURL: Self.imageURL(isLive ? (preview ?? avatar) : avatar),
+            categoryName: game,
+            viewerCount: isLive ? viewers : 0,
+            isLive: isLive
+        )
+    }
+
     /// Pure parser for the [ChannelShell, StreamMetadata] batch.
+    /// Legacy: wzgrx 4.x replaced this pair with the raw user query
+    /// (see roomDetail); kept only as a reference parser.
     /// Returns nil when the channel does not exist. Testable without
     /// the network.
     static func room(fromDetailBatch response: JSONValue, fallbackLogin: String) -> LiveRoom? {
@@ -515,15 +586,62 @@ final class TwitchSite: LiveSite, @unchecked Sendable {
         ) else { throw LiveSiteError.invalidResponse }
         let response = try await gql(body)
         let access = response["data"]["streamPlaybackAccessToken"]
+        // Pure Live's accessToken(): a null token is an unknown
+        // channel (NotFound); a token without value/signature is an
+        // API change — the old code silently returned no streams.
+        guard !access.isNull else { throw LiveSiteError.roomNotFound(login) }
         guard let token = access["value"].stringValue, !token.isEmpty,
               let signature = access["signature"].stringValue, !signature.isEmpty else {
-            return []
+            throw LiveSiteError.invalidResponse
+        }
+        // The token's own authorization claim: forbidden is a
+        // region block when the reason names geo, else a login
+        // requirement (Pure Live's accessToken()).
+        if let tokenData = token.data(using: .utf8),
+           let claims = JSONValue.parse(tokenData),
+           claims["authorization"]["forbidden"].boolValue == true {
+            let reason = claims["authorization"]["reason"].stringValue ?? ""
+            if reason.lowercased().contains("geo") {
+                throw LiveSiteError.message("该直播在你所在的地区无法播放")
+            }
+            throw LiveSiteError.message("该直播需要登录才能观看")
         }
         let masterURL = Self.usherURL(login: login, token: token, signature: signature)
-        let data = try await http.get(masterURL, headers: ["User-Agent": Self.chromeUA])
+        let data: Data
+        do {
+            // Pure Live's usherHeaders: the full GraphQL identity,
+            // not a bare User-Agent (the old call sent UA only).
+            data = try await http.get(masterURL, headers: usherHeaders())
+        } catch LiveSiteError.httpStatus(let code) {
+            // Pure Live's usherStatus(): 404 is a channel that is
+            // not broadcasting; 403 names why this viewer may not
+            // watch.
+            if code == 404 { throw LiveSiteError.message("该频道当前没有直播") }
+            if code == 403 { throw LiveSiteError.message("Twitch 拒绝了播放请求（可能为地区限制）") }
+            throw LiveSiteError.httpStatus(code)
+        }
         guard let text = String(data: data, encoding: .utf8) else { return [] }
+        // Pure Live's qualities(): an answer that is not a playlist
+        // is an API change, not an empty stream list.
+        guard text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("#EXTM3U") else {
+            throw LiveSiteError.invalidResponse
+        }
         let headers = PlaybackHeaders.headers(platform: .twitch, roomID: login)
-        return Self.streams(fromMasterPlaylist: text, headers: headers)
+        return Self.streams(fromMasterPlaylist: text, masterURL: URL(string: masterURL), headers: headers)
+    }
+
+    /// Usher request headers (Pure Live's usherHeaders): the
+    /// GraphQL identity, without the session.
+    private func usherHeaders() -> [String: String] {
+        [
+            "User-Agent": Self.chromeUA,
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept": "application/vnd.twitchtv.v5+json",
+            "Client-ID": Self.clientID,
+            "Device-Id": deviceID,
+            "Origin": Self.webBase,
+            "Referer": "\(Self.webBase)/",
+        ]
     }
 
     /// The usher URL. sig/token are percent-encoded with a strict
@@ -544,6 +662,10 @@ final class TwitchSite: LiveSite, @unchecked Sendable {
             ("playlist_include_framerate", "true"),
             ("reassignments_supported", "true"),
             ("sig", signature),
+            // Pure Live's usherUrl asks for H.264 only while
+            // "优先 H.264" is on (the default) — the old URL asked
+            // for nothing, so usher could answer HEVC/AV1 variants.
+            ("supported_codecs", "h264"),
             ("token", token),
             ("transcode_mode", "cbr_v1"),
         ]
@@ -560,11 +682,15 @@ final class TwitchSite: LiveSite, @unchecked Sendable {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
+    static func streams(fromMasterPlaylist content: String, headers: [String: String]) -> [PlayStream] {
+        streams(fromMasterPlaylist: content, masterURL: nil, headers: headers)
+    }
+
     /// Pure parser for a Twitch master playlist: each
     /// #EXT-X-STREAM-INF plus its following URI is one quality,
     /// best first (source first, then bandwidth descending).
     /// Testable without the network.
-    static func streams(fromMasterPlaylist content: String, headers: [String: String]) -> [PlayStream] {
+    static func streams(fromMasterPlaylist content: String, masterURL: URL?, headers: [String: String]) -> [PlayStream] {
         var grouped: [String: (label: String, sort: Int, urls: [String])] = [:]
         var pending: [String: String]?
         for rawLine in content.components(separatedBy: .newlines) {
@@ -575,8 +701,17 @@ final class TwitchSite: LiveSite, @unchecked Sendable {
             }
             guard !line.isEmpty, !line.hasPrefix("#"), let attributes = pending else { continue }
             pending = nil
-            guard line.hasPrefix("http://") || line.hasPrefix("https://"),
-                  let url = URL(string: line) else { continue }
+            // Pure Live resolves the variant URI against the master
+            // (master.resolve); the old code dropped every relative
+            // URI. Twitch's are absolute in practice, but a
+            // relative one must not silently lose a quality.
+            let url: URL?
+            if let base = masterURL {
+                url = URL(string: line, relativeTo: base)?.absoluteURL
+            } else {
+                url = URL(string: line)
+            }
+            guard let url, url.scheme == "http" || url.scheme == "https" else { continue }
             let bandwidth = Int(attributes["BANDWIDTH"] ?? "") ?? 0
             let resolution = attributes["RESOLUTION"] ?? ""
             let height = Int(resolution.split(separator: "x").last.map(String.init) ?? "") ?? 0

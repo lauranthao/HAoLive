@@ -105,6 +105,10 @@ final class LivePlayerService: ObservableObject {
     /// the stream is relayed. While set, the splicer — not the
     /// lease timer — owns renewals (see engineDidBecomeReady).
     private var activeRelayInput: FlvRelayInput?
+    /// The HLS relay input currently owned by the playing stream,
+    /// if the line is relayed for segment restore (Bigo). While
+    /// set, mpv plays from the loopback relay, not the upstream.
+    private var activeHlsRelayInput: HlsRelayInput?
     private var activeEngine: (any PlayerEngine)?
     private var watchdogTask: Task<Void, Never>?
     /// Lease-refresh timer for the currently playing stream
@@ -150,9 +154,12 @@ final class LivePlayerService: ObservableObject {
         lastErrorMessage = nil
         candidates = [best] + streams.filter { $0.id != best.id }
         state = .loading
-        // FLV + lease: splice renewals in through the loopback
-        // relay instead of a reopen (wzgrx flvSplice). Direct
-        // otherwise — the sweep below.
+        // HLS lines whose segments are masked upstream are
+        // relayed so the segments are restored first (ref
+        // live_media bigoRelayRecipe); FLV + lease lines go
+        // through the splicer relay instead. Direct otherwise —
+        // the sweep below.
+        if startHlsRelayed(best) { return }
         if startRelayed(best) { return }
         tryNextCandidate()
     }
@@ -174,6 +181,7 @@ final class LivePlayerService: ObservableObject {
         lastErrorMessage = nil
         candidates = [stream] + availableStreams.filter { $0.id != stream.id }
         state = .loading
+        if startHlsRelayed(stream) { return }
         if startRelayed(stream) { return }
         tryNextCandidate()
     }
@@ -227,6 +235,7 @@ final class LivePlayerService: ObservableObject {
         triedStreamIDs = []
         notice = nil
         candidates = [stream] + availableStreams.filter { $0.id != stream.id }
+        if startHlsRelayed(stream, engine: engine) { return }
         if startRelayed(stream, engine: engine) { return }
         attempt(engine: engine, stream: stream)
     }
@@ -305,6 +314,8 @@ final class LivePlayerService: ObservableObject {
     private func closeRelayInput() {
         activeRelayInput?.close()
         activeRelayInput = nil
+        activeHlsRelayInput?.close()
+        activeHlsRelayInput = nil
     }
 
     /// Why a relay renewal could not resolve a fresh line. The
@@ -356,6 +367,41 @@ final class LivePlayerService: ObservableObject {
             }
         )
         activeRelayInput = input
+        candidates = [stream]
+        state = .loading
+        attempt(engine: engine, stream: stream, overrideURL: input.uri)
+        return true
+    }
+
+    /// Plays an HLS line whose segments are masked upstream
+    /// through the loopback relay (ref live_media
+    /// bigoRelayRecipe / BigoHlsProtection): the relay rewrites
+    /// the playlists to point back here and un-masks each
+    /// protected segment before mpv sees it. Returns false when
+    /// the line needs no restore, or no engine / relay is
+    /// available — the caller then falls through to the FLV
+    /// relay or the direct sweep.
+    @discardableResult
+    private func startHlsRelayed(_ stream: PlayStream, engine: (any PlayerEngine)? = nil) -> Bool {
+        guard stream.needsHlsSegmentRestore else { return false }
+        guard let engine = engine ?? engines.first else {
+            log.error("relay: no engine to play the relayed line")
+            return false
+        }
+        if relay == nil {
+            do {
+                relay = try LoopbackRelay.start()
+            } catch {
+                log.error("relay: loopback server failed to start: \(error.localizedDescription, privacy: .public)")
+                return false
+            }
+        }
+        guard let relay else { return false }
+        let input = relay.openHls(line: stream) { playlist in
+            guard let seed = try BigoHlsProtection.seed(fromManifest: playlist) else { return nil }
+            return { segment in try BigoHlsProtection.transformSegment(segment, seed: seed) }
+        }
+        activeHlsRelayInput = input
         candidates = [stream]
         state = .loading
         attempt(engine: engine, stream: stream, overrideURL: input.uri)
@@ -443,6 +489,10 @@ final class LivePlayerService: ObservableObject {
             return
         }
         if let candidate = candidates.first(where: { !triedStreamIDs.contains($0.id) && engine.canPlay($0) }) {
+            // A re-resolved Bigo line must go through the HLS
+            // relay again, not direct — its segments are still
+            // masked upstream.
+            if startHlsRelayed(candidate, engine: engine) { return }
             attempt(engine: engine, stream: candidate)
             return
         }
@@ -475,7 +525,14 @@ final class LivePlayerService: ObservableObject {
         activeEngine = engine
         engine.delegate = self
         attachVideoView(engine.videoView)
-        if overrideURL == nil { activeRelayInput = nil }
+        if overrideURL == nil {
+            activeRelayInput = nil
+            // A direct attempt owns no HLS relay input either —
+            // closing it drops its loopback route, so a later
+            // open cannot serve a stale playlist.
+            activeHlsRelayInput?.close()
+            activeHlsRelayInput = nil
+        }
         engine.open(url: overrideURL ?? stream.httpsURL, headers: overrideURL == nil ? stream.headers : [:], format: stream.format)
         startWatchdog(for: engine)
     }
@@ -486,11 +543,18 @@ final class LivePlayerService: ObservableObject {
     private func displayName(for engine: any PlayerEngine) -> String {
         #if canImport(Libmpv)
         if let mpv = engine as? MpvPlayerEngine {
+            let base: String
             switch mpv.renderPath {
-            case .gl: return "mpv (GL)"
-            case .sw: return "mpv (SW)"
-            case .glFailed(let reason): return "mpv (SW：GL失败：\(reason))"
+            case .gl: base = "mpv (GL)"
+            case .sw: base = "mpv (SW)"
+            case .glFailed(let reason): base = "mpv (SW：GL失败：\(reason))"
             }
+            // The decoder actually in use (hwdec-current): "no" =
+            // software decode. Empty until the first property event
+            // arrives — engineDidBecomeReady refreshes the name then.
+            let decode = mpv.hwdecCurrent
+            guard !decode.isEmpty else { return base }
+            return decode == "no" ? "\(base) · 软解" : "\(base) · \(decode)"
         }
         #endif
         return engine.name
@@ -570,6 +634,10 @@ extension LivePlayerService: PlayerEngineDelegate {
         cancelWatchdog()
         notice = nil
         state = .playing
+        // Refresh the display name now: hwdec-current has arrived by
+        // the first frame, so the on-screen render-path pill gains
+        // the decoder (GL + 软解 is the 原画 lag signature).
+        engineName = displayName(for: engine)
         log.info("就绪：\(self.engineName, privacy: .public)")
         engine.play()
         // Relayed lines are owned by the splicer: their renewal

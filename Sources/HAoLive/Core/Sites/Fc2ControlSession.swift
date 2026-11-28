@@ -29,11 +29,14 @@
 //
 // The control WebSocket is a live seat: Pure Live keeps it open
 // for the whole playback (the platform keeps HLS grants alive
-// through it). HAoLive's playURLs is one-shot — this helper
-// opens the seat, reads the master, and closes it. The master
-// URL + cookie keep working while the grant is valid, but
-// playback may stop when the grant expires and the player cannot
-// renew it. Same follow-up as niconico, not faked here.
+// through it). Fc2Control below is that seat, in Swift:
+// Fc2Site opens one per channel, reuses it while it is alive
+// (quality switches and lease refreshes read the playlists it
+// already announced, no new grant), and closes it when the room
+// closes (LiveSite.endPlaybackSession). A control that ends
+// (control_disconnection — the grant expired, code 4500 — or a
+// dropped socket) never reconnects with a used grant: the owner
+// takes a new grant.
 //
 // No login: pay/ticket/login rooms (directory) and limited/fee/
 // ticket/login_only rooms (member) are restricted and never
@@ -62,6 +65,12 @@ struct Fc2Room {
     let totalViewers: Int?
     let state: State
     let isAdult: Bool
+    /// The owner's picture (member answer only: profile icon /
+    /// image). Empty in directory rows — the room then falls back
+    /// to the cover (ref Fc2LiveApi.room: avatar, else cover).
+    /// A `var` with a default IS a memberwise-init parameter, so
+    /// existing construction sites compile unchanged.
+    var avatarURL: String = ""
     /// Restriction that makes the room unplayable; nil when public.
     let restriction: String?
 }
@@ -115,8 +124,24 @@ enum Fc2ControlSession {
         "\(origin)/\(channelID)/"
     }
 
-    /// Category names (Pure Live's Fc2Api.categoryName).
+    /// Category names (ref Fc2LiveApi.areaName, 3.x's zh.json).
+    /// Categories outside the catalog (0 and 8 "unknown", 6
+    /// premium, 7 official) have no name.
     static func categoryName(_ category: Int) -> String {
+        switch category {
+        case 1: return "闲聊"
+        case 2, 3: return "游戏 / 作业"
+        case 4: return "视频"
+        case 5: return "其他"
+        case 9: return "音频"
+        default: return ""
+        }
+    }
+
+    /// The English area name 3.x gave directory cards (ref
+    /// Fc2LiveApi.legacyAreaName); the keyword search still
+    /// matches it, so English searches find the same rooms.
+    static func legacyAreaName(_ category: Int) -> String {
         switch category {
         case 1: return "Idle Chat"
         case 2, 3: return "Game / Work"
@@ -199,6 +224,11 @@ enum Fc2ControlSession {
         let profile = data["profile_data"]
         guard let id = parseChannelID(channel["channelid"].stringValue ?? ""),
               id == expectedChannelID else { return nil }
+        // Ref Fc2LiveApi.member: a channel that never existed is
+        // answered with status 1 and an empty profile_data.userid.
+        if !profile.isNull, profile["userid"].stringValue == nil {
+            return nil
+        }
         let published = channel["is_publish"].intValue == 1
         let restriction = memberRestriction(
             limited: channel["is_limited"].intValue ?? 0,
@@ -231,6 +261,14 @@ enum Fc2ControlSession {
             totalViewers: nonNegative(channel["total"].intValue),
             state: state,
             isAdult: channel["adult"].intValue == 1,
+            // Ref Fc2LiveApi.member: the owner's picture is the
+            // profile icon, else the profile image (a field the
+            // old code never read — every FC2 avatar was the
+            // cover). A bad link is no image, never a failure.
+            avatarURL: HaoText.firstNonEmpty(
+                image(profile["icon"].stringValue ?? ""),
+                image(profile["image"].stringValue ?? "")
+            ) ?? "",
             restriction: restriction
         )
         return (room, version)
@@ -244,7 +282,7 @@ enum Fc2ControlSession {
         guard root["status"].intValue == 0,
               let rawURL = root["url"].stringValue, rawURL.count <= 2048,
               let token = root["control_token"].stringValue, !token.isEmpty, token.count <= 4096,
-              let orz = root["orz_raw"].stringValue,
+              let orz = root["orz_raw"].stringValue, orz.count <= 256,
               orz.range(of: #"^[A-Za-z0-9._~-]+$"#, options: .regularExpression) != nil,
               let uri = URL(string: rawURL),
               uri.scheme == "wss",
@@ -260,35 +298,156 @@ enum Fc2ControlSession {
         return value == "live.fc2.com" || value.hasSuffix(".live.fc2.com")
     }
 
-    /// Pure parser for the get_hls_information _response_:
-    /// the mode-0, status-0 playlist URL. Testable without the
-    /// network.
-    static func parseHlsResponse(_ response: JSONValue, expectedChannelID: String) -> URL? {
-        guard response["name"].stringValue == "_response_",
-              response["id"].intValue == 1 else { return nil }
-        let arguments = response["arguments"]
-        guard arguments["status"].intValue == 0 else { return nil }
-        for value in arguments["playlists"].arrayValue {
-            guard value["mode"].intValue == 0, value["status"].intValue == 0,
-                  let rawURL = value["url"].stringValue,
-                  let uri = URL(string: rawURL),
-                  uri.scheme == "https",
-                  uri.user == nil, uri.password == nil,
-                  isMediaHost(uri.host ?? ""),
-                  uri.path == "/a/stream/\(expectedChannelID)/0/master_playlist",
-                  uri.fragment == nil,
-                  let components = URLComponents(url: uri, resolvingAgainstBaseURL: false),
-                  let queryItems = components.queryItems,
-                  !queryItems.isEmpty,
-                  queryItems.allSatisfy({ ["targets", "c", "d"].contains($0.name) }),
-                  queryItems.contains(where: { $0.name == "c" && !($0.value ?? "").isEmpty }),
-                  queryItems.contains(where: { $0.name == "d" && !($0.value ?? "").isEmpty }),
-                  queryItems.contains(where: { $0.name == "targets" && isTargets($0.value ?? "") }) else {
-                continue
-            }
-            return uri
+    /// The tiers of the reference (ref Fc2LiveApi.tierQualities),
+    /// best first. The id is the tier's playlist mode in the
+    /// control's HLS answer; the site transcodes every tier, none
+    /// is the source.
+    static let tierModes = [50, 40, 30, 20, 10]
+
+    /// The display label of a quality id (ref Fc2LiveApi.
+    /// tierQualities + autoQuality: 50 is 3 Mbps (β), 40 is 2 Mbps).
+    static func qualityLabel(for id: String) -> String {
+        switch id {
+        case "50": return "超清 3M（β）"
+        case "40": return "超清 2M"
+        case "30": return "高清"
+        case "20": return "标清"
+        case "10": return "流畅"
+        case "auto": return "自适应 HLS"
+        default: return id
         }
-        return nil
+    }
+
+    /// The media request headers of a channel (ref Fc2LiveApi.
+    /// mediaHeaders, which its HLS relay sent): UA, origin and
+    /// the channel page as referer. No cookie — the control
+    /// session authorises server-side.
+    static func mediaHeaders(channelID: String) -> [String: String] {
+        [
+            "user-agent": userAgent,
+            "origin": origin,
+            "referer": channelURL(channelID),
+        ]
+    }
+
+    /// The playlist families of the control's HLS answer: low
+    /// latency (the one the old code read, modes 0, 10, 20, 30,
+    /// 90), high latency (mode + 1) and middle latency (mode + 2).
+    static let playlistFamilies = ["playlists", "playlists_high_latency", "playlists_middle_latency"]
+
+    /// Pure parser for the get_hls_information _response_ (ref
+    /// Fc2LiveApi.hlsPlaylists): every playlist of every family,
+    /// by mode. A mode below 10 is a family's master (0 is the
+    /// low-latency master the old code played), the others are
+    /// single variants (`<tier>` + the family's offset; 90 is
+    /// sound only). A row or a family that breaks the rules is
+    /// skipped alone; an answer without a usable playlist is an
+    /// empty map (the caller fails it), and a non-zero arguments
+    /// status is one too — the reference throws StreamUnavailable
+    /// there, the caller maps it to a message instead.
+    static func parseHlsPlaylists(_ response: JSONValue, expectedChannelID: String) -> [Int: URL] {
+        guard response["name"].stringValue == "_response_",
+              response["id"].intValue == 1 else { return [:] }
+        let arguments = response["arguments"]
+        guard arguments["status"].intValue == 0 else { return [:] }
+        var found: [Int: URL] = [:]
+        for family in playlistFamilies {
+            for value in arguments[family].arrayValue {
+                guard let mode = value["mode"].intValue, (0...999).contains(mode),
+                      value["status"].intValue == 0,
+                      let url = playlistURL(value["url"].stringValue, channelID: expectedChannelID, mode: mode) else {
+                    continue
+                }
+                if found[mode] == nil { found[mode] = url }
+            }
+        }
+        return found
+    }
+
+    /// One playlist URL, validated (ref Fc2LiveApi._playlist):
+    /// https on live.fc2.com or a subdomain, no user info or
+    /// fragment, at /a/stream/<channel>/<mode>/master_playlist
+    /// (a master, mode < 10) or /playlist (a variant), with
+    /// exactly the query parameters `c`, `d` (1–1024 chars) and,
+    /// for a master only, `targets` (up to 16 numbers of 1–3
+    /// digits).
+    static func playlistURL(_ raw: String?, channelID: String, mode: Int) -> URL? {
+        guard let raw, !raw.isEmpty, raw.count <= 65536,
+              let uri = URL(string: raw),
+              uri.scheme == "https",
+              uri.user == nil, uri.password == nil,
+              isMediaHost(uri.host ?? ""),
+              uri.fragment == nil else { return nil }
+        let master = mode < 10
+        guard uri.path == "/a/stream/\(channelID)/\(mode)/\(master ? "master_playlist" : "playlist")" else { return nil }
+        guard let components = URLComponents(url: uri, resolvingAgainstBaseURL: false),
+              let queryItems = components.queryItems else { return nil }
+        let keys = Set(queryItems.map { $0.name })
+        let wanted: Set<String> = master ? ["targets", "c", "d"] : ["c", "d"]
+        guard keys == wanted else { return nil }
+        func token(_ name: String) -> Bool {
+            guard let value = queryItems.first(where: { $0.name == name })?.value,
+                  !value.isEmpty, value.count <= 1024 else { return false }
+            return true
+        }
+        guard token("c"), token("d") else { return nil }
+        if master {
+            guard let targets = queryItems.first(where: { $0.name == "targets" })?.value,
+                  isTargets(targets) else { return nil }
+        }
+        return uri
+    }
+
+    /// The qualities a channel offers by its HLS answer's
+    /// playlists (ref Fc2LiveApi.qualitiesOf), in menu order:
+    /// each tier with a variant in any family (so `50` and `40`
+    /// only for the channels that have them), then `auto` when a
+    /// master is there. Empty when the answer has neither (sound
+    /// only).
+    static func qualitiesOf(_ playlists: [Int: URL]) -> [String] {
+        var ids: [String] = []
+        for mode in tierModes {
+            if [0, 1, 2].contains(where: { playlists[mode + $0] != nil }) {
+                ids.append(String(mode))
+            }
+        }
+        if [0, 1, 2].contains(where: { playlists[$0] != nil }) {
+            ids.append("auto")
+        }
+        return ids
+    }
+
+    /// The playlist to play for `quality` among `playlists`
+    /// (ref Fc2LiveApi.playlistFor), or nil when there is none:
+    /// a tier plays a single variant — its high-latency one
+    /// (mode + 1), else its low-latency one, else its
+    /// middle-latency one; a tier the channel does not offer falls
+    /// back to the next lower tier, then the next higher, then to
+    /// a master. `auto` plays the low-latency master, else the
+    /// high- or middle-latency master, else the best tier. The
+    /// result names the quality that actually plays.
+    static func playlistFor(_ playlists: [Int: URL], quality: String) -> (quality: String, url: URL)? {
+        func tier(_ mode: Int) -> (String, URL)? {
+            for offset in [1, 0, 2] {
+                if let url = playlists[mode + offset] { return (String(mode), url) }
+            }
+            return nil
+        }
+        func master() -> (String, URL)? {
+            for mode in [0, 1, 2] {
+                if let url = playlists[mode] { return ("auto", url) }
+            }
+            return nil
+        }
+        if quality == "auto" { return master() ?? tierModes.compactMap(tier).first }
+        guard let requested = Int(quality), tierModes.contains(requested),
+              String(requested) == quality else { return nil }
+        let lower = tierModes.filter { $0 < requested }
+        let higher = tierModes.reversed().filter { $0 > requested }
+        for mode in [requested] + lower + higher {
+            if let found = tier(mode) { return found }
+        }
+        return master()
     }
 
     static func isMediaHost(_ host: String) -> Bool {
@@ -341,6 +500,11 @@ enum Fc2ControlSession {
             "client_app": "browser_hls",
             "ipv6": "",
         ], http: http)
+        // Ref Fc2LiveApi.grant: a status other than 0 is
+        // StreamUnavailable, not a malformed answer.
+        if let status = root["status"].intValue, status != 0 {
+            throw LiveSiteError.message("该频道暂时无法播放")
+        }
         guard let grant = parseControlGrant(root, expectedChannelID: channelID) else {
             throw LiveSiteError.invalidResponse
         }
@@ -375,68 +539,171 @@ enum Fc2ControlSession {
     }
 
 #if !os(Linux)
-    /// Open a control seat, read the HLS master URL, and close
-    /// the seat again (see the lifetime caveat in the file
-    /// header). Returns the master URL plus the Cookie header
-    /// the player must send with it.
-    static func fetchMaster(channelID: String, http: HTTPClient) async throws -> (masterURL: URL, cookie: String) {
-        let grant = try await controlGrant(channelID: channelID, http: http)
+/// @unchecked Sendable holder for a WebSocket task, so the
+/// task group's @Sendable child tasks may hold it.
+private final class Fc2SocketBox: @unchecked Sendable {
+    let socket: URLSessionWebSocketTask
+    init(_ socket: URLSessionWebSocketTask) { self.socket = socket }
+}
+
+/// A held FC2 media-control seat (ref Fc2LiveControl,
+/// fc2live_control.dart): the WebSocket whose session
+/// authorises a channel's HLS playlists. The media server
+/// refuses variant playlists once the socket is gone, so
+/// whoever opens the control keeps it open for exactly as long
+/// as its consumer reads the playlist, and closes it
+/// afterwards. The socket pings every 15 s; anything else, a
+/// `control_disconnection` (the grant expired, code 4500), an
+/// error or the socket closing ends the control, which never
+/// reconnects with a used grant — the owner takes a new grant.
+final class Fc2Control: @unchecked Sendable {
+    let channelID: String
+    /// Every playlist the HLS answer named, by mode.
+    let playlists: [Int: URL]
+    private let socket: URLSessionWebSocketTask
+    private let lock = NSLock()
+    private var _closed = false
+    private var _ended = false
+    private var _tasks: [Task<Void, Never>] = []
+
+    /// Whether the control has ended: its playlist must not be
+    /// opened any more.
+    var isAlive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !_closed && !_ended
+    }
+
+    private init(channelID: String, playlists: [Int: URL], socket: URLSessionWebSocketTask) {
+        self.channelID = channelID
+        self.playlists = playlists
+        self.socket = socket
+    }
+
+    /// Open a control seat for a fresh grant and wait for the HLS
+    /// answer (ref Fc2LiveControl.open: 20 s startup timeout).
+    /// The caller owns the control and closes it when its
+    /// consumer is done.
+    static func open(grant: Fc2ControlGrant) async throws -> Fc2Control {
         var components = URLComponents(url: grant.webSocket, resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "control_token", value: grant.controlToken)]
         guard let url = components?.url else { throw LiveSiteError.invalidResponse }
         var request = URLRequest(url: url)
-        request.setValue(origin, forHTTPHeaderField: "Origin")
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(Fc2ControlSession.origin, forHTTPHeaderField: "Origin")
+        request.setValue(Fc2ControlSession.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("l_ortkn=\(grant.orz)", forHTTPHeaderField: "Cookie")
         let socket = URLSession.shared.webSocketTask(with: request)
         socket.resume()
-        defer { socket.cancel(with: .normalClosure, reason: nil) }
         let box = Fc2SocketBox(socket)
-        let master = try await withThrowingTaskGroup(of: URL.self) { group in
-            group.addTask {
-                let socket = box.socket
-                var requested = false
-                while true {
-                    let message: URLSessionWebSocketTask.Message = try await socket.receive()
-                    guard case .string(let text) = message,
-                          let data = text.data(using: .utf8),
-                          let json = JSONValue.parse(data) else { continue }
-                    switch json["name"].stringValue {
-                    case "connect_complete":
-                        if !requested {
-                            requested = true
-                            try await socket.send(.string("{\"name\":\"get_hls_information\",\"arguments\":{},\"id\":1}"))
+        let playlists: [Int: URL]
+        do {
+            playlists = try await withThrowingTaskGroup(of: [Int: URL].self) { group in
+                group.addTask {
+                    let socket = box.socket
+                    var requested = false
+                    while true {
+                        let message = try await socket.receive()
+                        guard case .string(let text) = message,
+                              let data = text.data(using: .utf8),
+                              let json = JSONValue.parse(data) else { continue }
+                        switch json["name"].stringValue {
+                        case "connect_complete":
+                            if !requested {
+                                requested = true
+                                try await socket.send(.string("{\"name\":\"get_hls_information\",\"arguments\":{},\"id\":1}"))
+                            }
+                        case "_response_":
+                            // A non-zero answer status is a refused
+                            // channel, not a malformed answer.
+                            if let status = json["arguments"]["status"].intValue, status != 0 {
+                                throw LiveSiteError.message("该频道暂时无法播放")
+                            }
+                            let found = Fc2ControlSession.parseHlsPlaylists(json, expectedChannelID: grant.channelID)
+                            guard !found.isEmpty else { throw LiveSiteError.invalidResponse }
+                            return found
+                        case "control_disconnection":
+                            throw LiveSiteError.networkUnavailable
+                        default:
+                            continue
                         }
-                    case "_response_":
-                        if let master = parseHlsResponse(json, expectedChannelID: grant.channelID) {
-                            return master
-                        }
-                        throw LiveSiteError.invalidResponse
-                    case "control_disconnection":
-                        throw LiveSiteError.networkUnavailable
-                    default:
-                        continue
                     }
                 }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(20))
+                    throw LiveSiteError.networkUnavailable
+                }
+                guard let found = try await group.next() else {
+                    throw LiveSiteError.invalidResponse
+                }
+                group.cancelAll()
+                return found
             }
-            group.addTask {
-                try await Task.sleep(for: .seconds(20))
-                throw LiveSiteError.networkUnavailable
-            }
-            guard let master = try await group.next() else {
-                throw LiveSiteError.invalidResponse
-            }
-            group.cancelAll()
-            return master
+        } catch {
+            socket.cancel(with: .normalClosure, reason: nil)
+            throw error
         }
-        return (master, "l_ortkn=\(grant.orz)")
+        let control = Fc2Control(channelID: grant.channelID, playlists: playlists, socket: socket)
+        control.startBackgroundLoops()
+        return control
     }
 
-    /// @unchecked Sendable holder for a WebSocket task (see
-    /// NiconicoMaster.SocketBox for the same pattern).
-    final class Fc2SocketBox: @unchecked Sendable {
-        let socket: URLSessionWebSocketTask
-        init(_ socket: URLSessionWebSocketTask) { self.socket = socket }
+    /// Receive loop (a later `control_disconnection` or a dropped
+    /// socket ends the control) + the 15 s WebSocket ping (ref
+    /// Fc2LiveControl.pingInterval).
+    private func startBackgroundLoops() {
+        let receive = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                do {
+                    let message = try await self.socket.receive()
+                    if case .string(let text) = message,
+                       let data = text.data(using: .utf8),
+                       let json = JSONValue.parse(data),
+                       json["name"].stringValue == "control_disconnection" {
+                        self.markEnded()
+                        return
+                    }
+                } catch {
+                    self.markEnded()
+                    return
+                }
+            }
+        }
+        let ping = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                guard !Task.isCancelled, self.isAlive else { break }
+                self.socket.sendPing { _ in }
+            }
+        }
+        lock.lock()
+        _tasks = [receive, ping]
+        lock.unlock()
     }
+
+    /// Ends the control: the timers stop and the socket is closed
+    /// (ref Fc2LiveControl.close). Idempotent.
+    func close() {
+        let tasks: [Task<Void, Never>] = {
+            lock.lock()
+            defer { lock.unlock() }
+            if _closed { return [] }
+            _closed = true
+            return _tasks
+        }()
+        for task in tasks { task.cancel() }
+        socket.cancel(with: .normalClosure, reason: nil)
+    }
+
+    private func markEnded() {
+        lock.lock()
+        let already = _closed || _ended
+        _ended = true
+        lock.unlock()
+        guard !already else { return }
+        socket.cancel(with: .normalClosure, reason: nil)
+    }
+}
 #endif
 }

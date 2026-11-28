@@ -57,11 +57,13 @@ final class LookSite: LiveSite, @unchecked Sendable {
 
     func recommendRooms(page: Int) async throws -> [LiveRoom] {
         guard page >= 1 else { return [] }
-        // Video + audio are two separate feeds; merge + dedupe.
-        let video = try await directory(kind: .video, page: page)
-        let audio = try await directory(kind: .audio, page: page)
+        // Video + audio are two separate feeds; ask both at once
+        // (wzgrx _page: Future.wait, video first).
+        async let video = directory(kind: .video, page: page)
+        async let audio = directory(kind: .audio, page: page)
+        let (videoRooms, audioRooms) = try await (video, audio)
         var seen = Set<String>()
-        return (video + audio).filter { seen.insert($0.roomID).inserted }
+        return (videoRooms + audioRooms).filter { seen.insert($0.roomID).inserted }
     }
 
     func categoryRooms(_ category: LiveCategory) async throws -> [LiveRoom] {
@@ -135,23 +137,46 @@ final class LookSite: LiveSite, @unchecked Sendable {
         guard let id = Self.parseRoomID(roomID) else { throw LiveSiteError.roomNotFound(roomID) }
         let data = try await post(path: "/weapi/livestream/room/get/v3", plaintext: "{\"liveRoomNo\":\"\(id)\"}")
         if data["code"].intValue == 404 { throw LiveSiteError.roomNotFound(roomID) }
+        // wzgrx _data(room: true): 424 is app-only ("暂不支持此直播，
+        // 请在APP中查看"), 555 is a private room with a password.
+        if data["code"].intValue == 424 { throw LiveSiteError.message("该直播仅限 LOOK App 观看") }
+        if data["code"].intValue == 555 { throw LiveSiteError.message("私密房间，需密码才能观看") }
         guard data["code"].intValue == 200 else { throw LiveSiteError.invalidResponse }
         let body = data["data"]
         let anchor = body["anchor"]
         guard anchor["liveRoomNo"].stringValue == id else { throw LiveSiteError.roomNotFound(roomID) }
         let info = body["roomInfo"]
-        let liveType = info["liveType"].intValue ?? 1
+        // wzgrx _kindOf: liveType must be 1 or 2, anything else is
+        // ApiChanged.
+        guard let liveType = info["liveType"].intValue, liveType == 1 || liveType == 2 else {
+            throw LiveSiteError.invalidResponse
+        }
         let status = body["liveStatus"].intValue ?? -1
         let isLive = status == 1
-        let variants = isLive ? Self.variants(fromLiveURL: info["liveUrl"]) : []
+        // wzgrx LookLiveApi.room: paid = _paid(data['feeInfo']) —
+        // fee set (true or non-zero) with no sessionKey (a bought
+        // ticket; never for an anonymous client). App-only =
+        // liveStreamType 50 with no stream address at all
+        // (isAppOnly). A paid or app-only live room carries no
+        // variants, so it is never handed playable URLs.
+        let feeInfo = body["feeInfo"]
+        let isPaid = feeInfo["fee"].boolValue == true && (feeInfo["sessionKey"].stringValue ?? "").isEmpty
+        let liveURL = info["liveUrl"]
+        let hasAddress = !(liveURL["hlsPullUrl"].stringValue ?? "").isEmpty
+            || !(liveURL["httpPullUrl"].stringValue ?? "").isEmpty
+        let isAppOnly = info["liveStreamType"].intValue == 50 && !hasAddress
+        let variants = (isLive && !isPaid && !isAppOnly) ? Self.variants(fromLiveURL: liveURL) : []
+        let cover = Self.imageURL(info["liveCoverUrl"].stringValue)
+        // wzgrx liveRoom: avatar falls back to the cover when empty.
+        let avatar = Self.imageURL(anchor["avatarUrl"].stringValue) ?? cover
         return LiveRoom(
             id: "looklive-\(id)",
             platform: .looklive,
             roomID: id,
             title: info["title"].stringValue ?? "",
             anchorName: anchor["nickName"].stringValue ?? "",
-            anchorAvatarURL: Self.imageURL(anchor["avatarUrl"].stringValue),
-            coverURL: Self.imageURL(info["liveCoverUrl"].stringValue),
+            anchorAvatarURL: avatar,
+            coverURL: cover,
             categoryName: liveType == 2 ? "音频" : "视频",
             viewerCount: 0,
             isLive: isLive,
@@ -202,7 +227,7 @@ final class LookSite: LiveSite, @unchecked Sendable {
     private func post(path: String, plaintext: String) async throws -> JSONValue {
         let envelope = WeAPI.encryptPayload(plaintext)
         guard let url = URL(string: "\(Self.apiBase)\(path)") else { throw LiveSiteError.invalidResponse }
-        var request = URLRequest(url: url, timeoutInterval: 15)
+        var request = URLRequest(url: url, timeoutInterval: 20)
         request.httpMethod = "POST"
         request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -251,14 +276,17 @@ final class LookSite: LiveSite, @unchecked Sendable {
         guard let roomID = user["liveRoomNo"].stringValue, !roomID.isEmpty else { return nil }
         let liveType = live["liveType"].intValue ?? 1
         let variants = Self.variants(fromLiveURL: live["liveUrl"])
+        let cover = Self.imageURL(live["liveCoverUrl"].stringValue)
+        // wzgrx liveRoom: avatar falls back to the cover when empty.
+        let avatar = Self.imageURL(user["avatarUrl"].stringValue) ?? cover
         return LiveRoom(
             id: "looklive-\(roomID)",
             platform: .looklive,
             roomID: roomID,
             title: live["liveTitle"].stringValue ?? "",
             anchorName: user["nickname"].stringValue ?? "",
-            anchorAvatarURL: Self.imageURL(user["avatarUrl"].stringValue),
-            coverURL: Self.imageURL(live["liveCoverUrl"].stringValue),
+            anchorAvatarURL: avatar,
+            coverURL: cover,
             categoryName: liveType == 2 ? "音频" : "视频",
             viewerCount: live["onlineNumber"].intValue ?? live["popularity"].intValue ?? 0,
             isLive: true,
@@ -280,12 +308,16 @@ final class LookSite: LiveSite, @unchecked Sendable {
         return out
     }
 
+    /// wzgrx mediaUri: a single-label host
+    /// ^[a-z0-9-]+\.live\.126\.net$, no port, no fragment, query at
+    /// most 2048 characters, path /live/<32 lower-case hex>/... .
     static func isValidMediaURL(_ raw: String, protocol proto: String) -> Bool {
         guard let url = URL(string: raw),
               let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = url.host?.lowercased(),
-              host.hasSuffix(".live.126.net"),
-              url.user == nil, url.fragment == nil else { return false }
+              host.range(of: #"^[a-z0-9-]+\.live\.126\.net$"#, options: .regularExpression) != nil,
+              url.port == nil, url.user == nil, url.fragment == nil,
+              (url.query?.count ?? 0) <= 2048 else { return false }
         let path = url.path
         if proto == "hls" {
             return path.range(of: #"^/live/[0-9a-f]{32}/playlist\.m3u8$"#, options: .regularExpression) != nil
@@ -308,18 +340,29 @@ final class LookSite: LiveSite, @unchecked Sendable {
     }
 
     /// Bare numeric id (2-18 digits) or a look.163.com/live?id= link.
+    /// wzgrx roomIdFromUrl: http(s) on look.163.com (any case), no
+    /// user info, port 80/443/none, no fragment, the one path segment
+    /// `live` (any case), exactly one `id`; over 8192 chars or with
+    /// control characters is refused.
     static func parseRoomID(_ raw: String) -> String? {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.range(of: #"^[1-9][0-9]{1,17}$"#, options: .regularExpression) != nil {
             return value
         }
-        guard let url = URL(string: value),
+        guard value.count <= 8192,
+              !value.unicodeScalars.contains(where: { $0.value <= 0x20 || $0.value == 0x7f }),
+              let url = URL(string: value),
               let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               url.host?.lowercased() == "look.163.com",
-              url.path == "/live",
+              url.user == nil, url.fragment == nil,
+              url.port == nil || url.port == 80 || url.port == 443,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let id = components.queryItems?.first(where: { $0.name == "id" })?.value,
+              let ids = components.queryItems?.filter({ $0.name == "id" }), ids.count == 1,
+              let id = ids.first?.value,
               id.range(of: #"^[1-9][0-9]{1,17}$"#, options: .regularExpression) != nil else { return nil }
+        // One path segment `live`, any case; empty segments ignored.
+        let segments = url.pathComponents.filter { $0 != "/" }
+        guard segments.count == 1, segments[0].lowercased() == "live" else { return nil }
         return id
     }
 }

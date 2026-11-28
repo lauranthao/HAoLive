@@ -128,17 +128,43 @@ final class TiktokSite: LiveSite, @unchecked Sendable {
         let headers = Self.mediaHeaders(username: username)
         var streams: [PlayStream] = []
         for info in data.streams {
+            // Line ids are the protocol, per-protocol counted
+            // (Pure Live's resolution(): flv, flv#2, hls, hls#2).
+            var lineCounts: [String: Int] = [:]
             for (index, urlString) in info.urls.enumerated() {
                 guard let url = URL(string: urlString) else { continue }
+                let line: String
+                if let proto = Self.protocolName(for: urlString) {
+                    let count = (lineCounts[proto] ?? 0) + 1
+                    lineCounts[proto] = count
+                    line = count == 1 ? proto : "\(proto)#\(count)"
+                } else {
+                    line = "线路\(index + 1)"
+                }
                 streams.append(PlayStream(
                     url: url,
                     quality: info.quality,
-                    line: "线路\(index + 1)",
+                    line: line,
                     headers: headers
                 ))
             }
         }
+        guard !streams.isEmpty else {
+            // Live, unrestricted, but no stream could be read: Pure
+            // Live reports "live without a stream" — an empty list
+            // would only surface as a vague "暂无可播放的线路".
+            throw LiveSiteError.message("该直播暂无可播放的流")
+        }
         return streams
+    }
+
+    /// Protocol of a pull URL by its suffix ("FLV" / "HLS"), the
+    /// query string stripped first; nil when it names neither.
+    static func protocolName(for urlString: String) -> String? {
+        let path = urlString.split(separator: "?", maxSplits: 1).first.map(String.init) ?? urlString
+        if path.lowercased().hasSuffix(".flv") { return "FLV" }
+        if path.lowercased().hasSuffix(".m3u8") { return "HLS" }
+        return nil
     }
 
     // MARK: - Room fetch
@@ -153,6 +179,7 @@ final class TiktokSite: LiveSite, @unchecked Sendable {
 
     struct StreamInfo {
         var qualityID: String
+        var codec: String
         var quality: String
         var urls: [String]
     }
@@ -162,8 +189,16 @@ final class TiktokSite: LiveSite, @unchecked Sendable {
     private func fetchRoom(username: String) async throws -> TikTokRoomData {
         let url = "\(Self.origin)/api-live/user/room/?aid=1988&sourceType=54&staleTime=600000&uniqueId=\(username)"
         let json = try await http.getJSON(url, headers: Self.requestHeaders(username: username))
-        guard json["statusCode"].intValue == 0 else {
-            throw LiveSiteError.roomNotFound(username)
+        let code = json["statusCode"].intValue ?? -1
+        if code != 0 {
+            // Pure Live's room(): only 19881007 (or a message saying
+            // the user does not exist) is NotFound; any other code is
+            // an API change, not "no such room".
+            let message = (json["message"].stringValue ?? "").lowercased()
+            if code == 19881007 || message.contains("not exist") || message.contains("not_found") {
+                throw LiveSiteError.roomNotFound(username)
+            }
+            throw LiveSiteError.invalidResponse
         }
         return try Self.roomData(fromAPI: json["data"], username: username)
     }
@@ -210,7 +245,11 @@ final class TiktokSite: LiveSite, @unchecked Sendable {
         if live["liveSubOnly"].intValue == 1 { return true }
         if user["secret"].boolValue == true { return true }
         let paid = live["paidEvent"]
-        if !paid.isNull, !paid.arrayValue.isEmpty {
+        if !paid.isNull {
+            // paidEvent is an OBJECT ({paid_type: ...}), not an
+            // array — the old `!paid.arrayValue.isEmpty` check was
+            // false for every object, so paid LIVEs were never
+            // recognised as restricted.
             return (paid["paid_type"].intValue ?? 0) > 0
         }
         return false
@@ -220,16 +259,21 @@ final class TiktokSite: LiveSite, @unchecked Sendable {
 
     /// Pure parser for liveRoom.streamData + hevcStreamData
     /// (Pure Live's _streams / _readContainer). One StreamInfo per
-    /// (codec, quality, protocol); urls keep the server's order.
-    /// "ao" (audio-only) is skipped. Testable without the network.
+    /// (codec, quality); its urls are FLV then HLS lines, in the
+    /// server's order. "ao" (audio-only) is skipped. Testable
+    /// without the network.
     static func streams(fromLiveRoom live: JSONValue) -> [StreamInfo] {
         var builders: [String: StreamInfo] = [:]
         readContainer(live["streamData"], fallbackCodec: "h264", into: &builders)
         readContainer(live["hevcStreamData"], fallbackCodec: "h265", into: &builders)
         var out = Array(builders.values.filter { !$0.urls.isEmpty })
+        // Pure Live's qualities() with "优先 H.264" on (the default):
+        // every H.264 quality comes before every H.265 one, best
+        // tier first within each codec — not the best tier overall.
         out.sort {
-            let aRank = qualityRank($0.qualityID) + ($0.quality.contains("H264") ? 100 : 0) + ($0.quality.contains("FLV") ? 20 : 10)
-            let bRank = qualityRank($1.qualityID) + ($1.quality.contains("H264") ? 100 : 0) + ($1.quality.contains("FLV") ? 20 : 10)
+            let aH264 = $0.codec == "h264", bH264 = $1.codec == "h264"
+            if aH264 != bH264 { return aH264 }
+            let aRank = qualityRank($0.qualityID), bRank = qualityRank($1.qualityID)
             if aRank != bRank { return aRank > bRank }
             return $0.qualityID < $1.qualityID
         }
@@ -259,10 +303,14 @@ final class TiktokSite: LiveSite, @unchecked Sendable {
             for proto in ["flv", "hls"] {
                 guard let rawURL = main[proto].stringValue, !rawURL.isEmpty,
                       isTrustedMediaURL(rawURL) else { continue }
-                let id = "\(codec):\(qualityID):\(proto)"
+                // One quality per (codec, tier); FLV then HLS are its
+                // lines (Pure Live's TikTokStream.urls), not separate
+                // qualities.
+                let id = "\(codec):\(qualityID)"
                 var builder = builders[id] ?? StreamInfo(
                     qualityID: qualityID,
-                    quality: displayQuality(qualityID: qualityID, resolution: resolution, codec: codec, protocol: proto),
+                    codec: codec,
+                    quality: displayQuality(qualityID: qualityID, resolution: resolution, codec: codec),
                     urls: []
                 )
                 if !builder.urls.contains(rawURL) { builder.urls.append(rawURL) }
@@ -271,11 +319,10 @@ final class TiktokSite: LiveSite, @unchecked Sendable {
         }
     }
 
-    private static func displayQuality(qualityID: String, resolution: String, codec: String, protocol proto: String) -> String {
+    private static func displayQuality(qualityID: String, resolution: String, codec: String) -> String {
         var parts: [String] = [qualityNames[qualityID] ?? qualityID.uppercased()]
         if !resolution.isEmpty { parts.append(resolution) }
         parts.append(codec.uppercased())
-        parts.append(proto.uppercased())
         return parts.joined(separator: " · ")
     }
 
@@ -283,7 +330,9 @@ final class TiktokSite: LiveSite, @unchecked Sendable {
         switch raw.lowercased() {
         case "": return fallback
         case "avc": return "h264"
-        case "hevc": return "h265"
+        // ByteDance's own name for H.265 (Pure Live's _codec); the
+        // old code dropped these tiers as an unknown codec.
+        case "hevc", "bytevc1": return "h265"
         case "h264", "h265": return raw.lowercased()
         default: return ""
         }
@@ -299,7 +348,12 @@ final class TiktokSite: LiveSite, @unchecked Sendable {
     private static func isTrustedMediaURL(_ raw: String) -> Bool {
         guard let url = URL(string: raw), url.scheme == "https",
               let host = url.host?.lowercased() else { return false }
+        // Pure Live's _trustedRoots: the regional CDNs tiktokcdn-us
+        // and tiktokcdn-eu serve real users too — the old list
+        // dropped every stream served from them.
         return host == "tiktokcdn.com" || host.hasSuffix(".tiktokcdn.com")
+            || host == "tiktokcdn-us.com" || host.hasSuffix(".tiktokcdn-us.com")
+            || host == "tiktokcdn-eu.com" || host.hasSuffix(".tiktokcdn-eu.com")
             || host == "tiktokv.com" || host.hasSuffix(".tiktokv.com")
             || host == "byteoversea.com" || host.hasSuffix(".byteoversea.com")
     }
@@ -329,6 +383,11 @@ final class TiktokSite: LiveSite, @unchecked Sendable {
             throw LiveSiteError.roomNotFound(raw)
         }
         let segments = url.pathComponents.filter { $0 != "/" }
+        if segments.count == 2, segments[0].lowercased() == "t" {
+            // The app's newer short-link form (Pure Live's
+            // TikTokLink.shortLink): www.tiktok.com/t/<code>.
+            return try await resolveShortLink(urlString)
+        }
         if segments.count >= 1, segments[0].hasPrefix("@") {
             guard let username = Self.normalizeUsername(String(segments[0].dropFirst())) else {
                 throw LiveSiteError.roomNotFound(raw)
@@ -366,7 +425,11 @@ final class TiktokSite: LiveSite, @unchecked Sendable {
         let href = String(after[..<end])
         guard let url = URL(string: href) else { return nil }
         let segments = url.pathComponents.filter { $0 != "/" }
-        guard let first = segments.first, first.hasPrefix("@") else { return nil }
+        // Pure Live's parse(): a user link is /@<user> or
+        // /@<user>/live only — a video link (/@<user>/video/…) is
+        // no room, and the old code resolved it to the user anyway.
+        guard let first = segments.first, first.hasPrefix("@"),
+              segments.count == 1 || (segments.count == 2 && segments[1].lowercased() == "live") else { return nil }
         return normalizeUsername(String(first.dropFirst()))
     }
 

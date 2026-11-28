@@ -33,8 +33,10 @@
 //           ?userid= (profile). vid empty = offline.
 //   streams videosource/videosourcemore (source FLV),
 //           smallsource/smallsourcemore (smooth FLV),
-//           hlsvideosource (HLS). Signed stream URLs are used
-//           verbatim (query parameters kept).
+//           hlsvideosource (HLS, a line of the source quality —
+//           ref liveme_api.streams, 21-7: one 原画 quality holds
+//           the FLV lines first, then the HLS line). Signed stream
+//           URLs are used verbatim (query parameters kept).
 // Danmaku: none (no danmaku file in the reference).
 
 import Foundation
@@ -163,7 +165,7 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
                 roomID: shortID,
                 title: nickname,
                 anchorName: nickname,
-                anchorAvatarURL: Self.imageURL(row["face"].stringValue),
+                anchorAvatarURL: Self.liveMeImageURL(row["face"].stringValue),
                 coverURL: nil,
                 categoryName: row["countryCode"].stringValue,
                 viewerCount: 0,
@@ -185,7 +187,20 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
     func roomDetail(roomID: String) async throws -> LiveRoom {
         guard let shortID = Self.parseShortID(roomID) else { throw LiveSiteError.roomNotFound(roomID) }
         let mapping = try await shortIDMapping(shortID: shortID)
-        let profile = try await profile(userID: mapping.userID)
+        // Ref liveme_site._room: the anchor's profile and, while
+        // broadcasting, the broadcast are asked in parallel.
+        async let profileTask = profile(userID: mapping.userID)
+        let video: VideoDetail?
+        if mapping.videoID.isEmpty {
+            video = nil
+        } else {
+            // Live (a vid is only issued for a live session): try the
+            // video call WITHOUT the signer. It usually answers empty
+            // (see the file header); the room is still returned with
+            // profile data, just without streams.
+            video = try? await videoDetail(videoID: mapping.videoID, expectedShortID: shortID)
+        }
+        let profile = try await profileTask
         guard profile.shortID == shortID, profile.userID == mapping.userID else {
             throw LiveSiteError.roomNotFound(roomID)
         }
@@ -204,19 +219,17 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
                 isLive: false
             )
         }
-        // Live (a vid is only issued for a live session): try the
-        // video call WITHOUT the signer. It usually answers empty
-        // (see the file header); the room is still returned with
-        // profile data, just without streams.
-        let video = try? await videoDetail(videoID: mapping.videoID, expectedShortID: shortID)
         return LiveRoom(
             id: "liveme-\(shortID)",
             platform: .liveme,
             roomID: shortID,
             title: video?.title ?? profile.nickname,
             anchorName: profile.nickname,
-            anchorAvatarURL: Self.imageURL(video?.avatar ?? profile.avatar),
-            coverURL: Self.imageURL(video?.cover ?? profile.cover),
+            // Ref liveme_api.withProfile: the avatar / cover fall
+            // back to the profile's wherever the broadcast has none
+            // (an empty broadcast field must not block the profile's).
+            anchorAvatarURL: Self.imageURL(HaoText.firstNonEmpty(video?.avatar, profile.avatar)),
+            coverURL: Self.imageURL(HaoText.firstNonEmpty(video?.cover, profile.cover)),
             categoryName: profile.countryCode.isEmpty ? nil : profile.countryCode,
             viewerCount: video?.viewerCount ?? 0,
             isLive: true,
@@ -249,11 +262,17 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
             "Origin": "https://www.liveme.com",
             "Referer": "https://www.liveme.com/livehot/streaming/\(shortID)",
         ]
+        // Ref liveme_api.resolution: FLV lines first, then the HLS
+        // line, in one quality; the line id is the format ("flv",
+        // "hls", "flv#2", ...), not the CDN host.
         var out: [PlayStream] = []
         for stream in streams {
-            for urlString in stream.urls {
-                guard let url = URL(string: urlString) else { continue }
-                out.append(PlayStream(url: url, quality: stream.qualityName, line: url.host ?? "主线路", headers: headers))
+            for (format, urls) in [("flv", stream.flv), ("hls", stream.hls)] {
+                for (index, urlString) in urls.enumerated() {
+                    guard let url = URL(string: urlString) else { continue }
+                    let line = index == 0 ? format : "\(format)#\(index + 1)"
+                    out.append(PlayStream(url: url, quality: stream.qualityName, line: line, headers: headers))
+                }
             }
         }
         return out
@@ -266,13 +285,19 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
         var shortID: String; var userID: String; var nickname: String
         var avatar: String; var cover: String; var bio: String; var countryCode: String
     }
+    /// The media URLs of one quality (ref liveme_api.LiveMeStream,
+    /// 21-7): `source` (原画) carries the FLV lines first, then the
+    /// HLS line; `smooth` (流畅) carries FLV lines only.
     struct LiveMeStream {
-        var qualityID: String; var proto: String; var urls: [String]
+        var qualityID: String
+        var flv: [String]
+        var hls: [String]
+        /// Every URL, in line order: FLV lines first, then HLS.
+        var urls: [String] { flv + hls }
         var qualityName: String {
             switch qualityID {
-            case "source-flv": return "原画·FLV"
-            case "smooth-flv": return "流畅·FLV"
-            case "hls": return "HLS"
+            case "source": return "原画"
+            case "smooth": return "流畅"
             default: return qualityID
             }
         }
@@ -310,8 +335,8 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
             shortID: Self.normalizeShortID(info["short_id"].stringValue ?? "") ?? "",
             userID: userID,
             nickname: HaoText.firstNonEmpty(info["nickname"].stringValue, info["uname"].stringValue) ?? "",
-            avatar: HaoText.firstNonEmpty(info["big_face"].stringValue, info["face"].stringValue) ?? "",
-            cover: HaoText.firstNonEmpty(info["big_cover"].stringValue, info["cover"].stringValue) ?? "",
+            avatar: Self.liveMeImageURL(info["big_face"].stringValue, info["face"].stringValue)?.absoluteString ?? "",
+            cover: Self.liveMeImageURL(info["big_cover"].stringValue, info["cover"].stringValue)?.absoluteString ?? "",
             bio: info["usign"].stringValue ?? "",
             countryCode: info["countryCode"].stringValue ?? ""
         )
@@ -378,16 +403,20 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
         let roomState = video["roomstate"].intValue
         let isLive = online == 1 && status == 0 && roomState == 0
         let nickname = HaoText.firstNonEmpty(video["uname"].stringValue, video["nickname"].stringValue) ?? ""
-        let title = video["title"].stringValue ?? ""
+        let rawTitle = video["title"].stringValue ?? ""
+        // Ref liveme_api.videoSnapshot: an empty title or one of
+        // the app's placeholder titles (defaultTitles) is the
+        // anchor's name — "Click for fun!" is not a real title.
+        let title = rawTitle.isEmpty || Self.defaultTitles.contains(rawTitle) ? nickname : rawTitle
         let streams = (isLive && includeMedia) ? streams(fromVideoInfo: video) : []
         return LiveRoom(
             id: "liveme-\(shortID)",
             platform: .liveme,
             roomID: shortID,
-            title: title.isEmpty ? nickname : title,
+            title: title,
             anchorName: nickname,
-            anchorAvatarURL: Self.imageURL(HaoText.firstNonEmpty(video["uface"].stringValue, video["face"].stringValue)),
-            coverURL: Self.imageURL(HaoText.firstNonEmpty(video["videocapture"].stringValue, video["smallcover"].stringValue)),
+            anchorAvatarURL: Self.liveMeImageURL(video["uface"].stringValue, video["face"].stringValue),
+            coverURL: Self.liveMeImageURL(video["videocapture"].stringValue, video["smallcover"].stringValue),
             categoryName: video["countryCode"].stringValue ?? video["country_code"].stringValue,
             viewerCount: isLive ? (video["playnumber"].intValue ?? 0) : 0,
             isLive: isLive,
@@ -396,35 +425,86 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
     }
 
     /// Private (ispvt==1) / paid (livebptype==7 / "paid broadcast").
+    /// Ref liveme_api.restrictionOf/isPaidLabel: hot_label_v2
+    /// arrives as JSON TEXT — it must be parsed before reading
+    /// `text`. The old code compared the raw JSON text itself, so
+    /// a paid room labelled {"text":"Paid broadcast"} was missed.
     static func isRestricted(_ video: JSONValue) -> Bool {
         if video["ispvt"].intValue == 1 { return true }
         if video["livebptype"].intValue == 7 { return true }
-        let label = video["hot_label_v2"]
-        let text: String
-        if !label.isNull, label.objectValue["text"] != nil {
-            text = label["text"].stringValue ?? ""
-        } else {
-            text = label.stringValue ?? ""
-        }
-        return text.lowercased() == "paid broadcast"
+        return isPaidLabel(video["hot_label_v2"])
     }
 
+    static func isPaidLabel(_ label: JSONValue) -> Bool {
+        if let text = label.stringValue {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("{"),
+                  let data = trimmed.data(using: .utf8),
+                  let parsed = JSONValue.parse(data) else { return false }
+            return parsed["text"].stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "paid broadcast"
+        }
+        return label["text"].stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "paid broadcast"
+    }
+
+    /// The app's placeholder broadcast titles (ref
+    /// liveme_api.defaultTitles): a broadcast titled like this has
+    /// no title of its own and is named by the anchor.
+    static let defaultTitles: Set<String> = [
+        "Click for fun!",
+        "¡Haz clic para divertirte!",
+        "Clique e divirta-se!",
+        "Нажмите и веселитесь!",
+        "انقر للمتعة!",
+    ]
+
+    /// An image URL the way ref liveme_api.image keeps one: http(s),
+    /// no user info or fragment, on esxscloud.com / liveme.com /
+    /// linkv.fun (or a subdomain), made https; the first usable
+    /// candidate wins, so a dead first field falls back to the next
+    /// (ref _firstImage, 21-2).
+    static func liveMeImageURL(_ values: String?...) -> URL? {
+        for raw in values {
+            guard let raw, !raw.isEmpty,
+                  let url = Self.imageURL(raw),
+                  let host = url.host?.lowercased(),
+                  host == "esxscloud.com" || host.hasSuffix(".esxscloud.com")
+                    || host == "liveme.com" || host.hasSuffix(".liveme.com")
+                    || host == "linkv.fun" || host.hasSuffix(".linkv.fun") else { continue }
+            return url
+        }
+        return nil
+    }
+
+    /// The media of a live `video_info` (ref liveme_api.streams,
+    /// 21-7): `source` with the FLV URLs of `videosource` and
+    /// `videosourcemore` and the HLS URL of `hlsvideosource`;
+    /// `smooth` with the FLV URLs of `smallsource` and
+    /// `smallsourcemore`. A quality without one is left out.
     static func streams(fromVideoInfo video: JSONValue) -> [LiveMeStream] {
-        var out: [LiveMeStream] = []
-        func add(_ qualityID: String, proto: String, values: [JSONValue]) {
-            var urls: [String] = []
+        func urls(_ values: [JSONValue], proto: String) -> [String] {
+            var out: [String] = []
             var seen = Set<String>()
             for value in values {
                 for raw in flattenURLs(value) {
                     guard let uri = mediaURL(raw, protocol: proto), seen.insert(uri).inserted else { continue }
-                    urls.append(uri)
+                    out.append(uri)
                 }
             }
-            if !urls.isEmpty { out.append(LiveMeStream(qualityID: qualityID, proto: proto, urls: urls)) }
+            return out
         }
-        add("source-flv", proto: "flv", values: [video["videosource"], video["videosourcemore"]])
-        add("smooth-flv", proto: "flv", values: [video["smallsource"], video["smallsourcemore"]])
-        add("hls", proto: "hls", values: [video["hlsvideosource"]])
+        var out: [LiveMeStream] = []
+        let source = LiveMeStream(
+            qualityID: "source",
+            flv: urls([video["videosource"], video["videosourcemore"]], proto: "flv"),
+            hls: urls([video["hlsvideosource"]], proto: "hls")
+        )
+        if !source.urls.isEmpty { out.append(source) }
+        let smooth = LiveMeStream(
+            qualityID: "smooth",
+            flv: urls([video["smallsource"], video["smallsourcemore"]], proto: "flv"),
+            hls: []
+        )
+        if !smooth.urls.isEmpty { out.append(smooth) }
         return out
     }
 
@@ -450,16 +530,21 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
 
     /// Stream URLs: https only, trusted LiveMe hosts, .flv / .m3u8
     /// by protocol. Query parameters (wsSecret etc.) kept verbatim.
+    /// Ref liveme_api.mediaUrl (21-6): on a trusted host the URL
+    /// is made https; on any other host (or with an explicit port)
+    /// it is kept as written — never dropped. The old code returned
+    /// nil for those, silently losing lines the reference plays.
     static func mediaURL(_ raw: String, protocol proto: String) -> String? {
         guard let url = URL(string: raw),
               let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
-              let host = url.host?.lowercased(),
-              (host == "linkv.fun" || host.hasSuffix(".linkv.fun")
-                || host == "emolm.com" || host.hasSuffix(".emolm.com")
-                || host == "liveme.com" || host.hasSuffix(".liveme.com")),
+              let host = url.host?.lowercased(), !host.isEmpty,
               url.user == nil, url.fragment == nil else { return nil }
         let path = url.path.lowercased()
         guard proto == "flv" ? path.hasSuffix(".flv") : path.hasSuffix(".m3u8") else { return nil }
+        guard (host == "linkv.fun" || host.hasSuffix(".linkv.fun")
+            || host == "emolm.com" || host.hasSuffix(".emolm.com")
+            || host == "liveme.com" || host.hasSuffix(".liveme.com")),
+              url.port == nil else { return raw }
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         components?.scheme = "https"
         return components?.url?.absoluteString
@@ -468,20 +553,51 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
     static func streamsJSON(_ streams: [LiveMeStream]) -> String? {
         guard !streams.isEmpty else { return nil }
         let items = streams.map { stream in
-            let urls = stream.urls.map { "\"\($0)\"" }.joined(separator: ",")
-            return "{\"qualityId\":\"\(stream.qualityID)\",\"protocol\":\"\(stream.proto)\",\"urls\":[\(urls)]}"
+            let flv = stream.flv.map { "\"\($0)\"" }.joined(separator: ",")
+            let hls = stream.hls.map { "\"\($0)\"" }.joined(separator: ",")
+            return "{\"qualityId\":\"\(stream.qualityID)\",\"flv\":[\(flv)],\"hls\":[\(hls)]}"
         }.joined(separator: ",")
         return "[\(items)]"
     }
 
     static func streams(fromStoredJSON json: JSONValue) -> [LiveMeStream] {
-        json.arrayValue.compactMap { item in
-            guard let qualityID = item["qualityId"].stringValue,
-                  let proto = item["protocol"].stringValue else { return nil }
-            let urls = item["urls"].arrayValue.compactMap { $0.stringValue }
-            guard !urls.isEmpty else { return nil }
-            return LiveMeStream(qualityID: qualityID, proto: proto, urls: urls)
+        // New shape: {"qualityId","flv":[],"hls":[]}. The build 11
+        // shape ({"qualityId","protocol","urls":[]}) is still read,
+        // so rooms saved before this change keep playing:
+        // source-flv -> source/flv, smooth-flv -> smooth/flv,
+        // hls -> source/hls.
+        var merged: [String: LiveMeStream] = [:]
+        var order: [String] = []
+        func ensure(_ qualityID: String) {
+            if merged[qualityID] == nil {
+                merged[qualityID] = LiveMeStream(qualityID: qualityID, flv: [], hls: [])
+                order.append(qualityID)
+            }
         }
+        for item in json.arrayValue {
+            guard let qualityID = item["qualityId"].stringValue else { continue }
+            if item["protocol"].stringValue == nil {
+                ensure(qualityID)
+                var stream = merged[qualityID]!
+                stream.flv += item["flv"].arrayValue.compactMap { $0.stringValue }
+                stream.hls += item["hls"].arrayValue.compactMap { $0.stringValue }
+                merged[qualityID] = stream
+            } else if let proto = item["protocol"].stringValue {
+                let urls = item["urls"].arrayValue.compactMap { $0.stringValue }
+                guard !urls.isEmpty else { continue }
+                let target: String
+                let isFlv: Bool
+                if qualityID == "source-flv" { target = "source"; isFlv = true }
+                else if qualityID == "smooth-flv" { target = "smooth"; isFlv = true }
+                else if qualityID == "hls" { target = "source"; isFlv = false }
+                else { target = qualityID; isFlv = proto == "flv" }
+                ensure(target)
+                var stream = merged[target]!
+                if isFlv { stream.flv += urls } else { stream.hls += urls }
+                merged[target] = stream
+            }
+        }
+        return order.compactMap { merged[$0] }.filter { !$0.urls.isEmpty }
     }
 
     /// Short id: 5-12 digits, first digit non-zero.
@@ -499,11 +615,13 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
     /// Bare short id, or a liveme.com link:
     /// /livehot/streaming/{short} (other link forms resolve to a
     /// user/video id and are handled by parseUserID / roomDetail).
+    /// Ref LiveMeLink.parse: an optional locale segment first
+    /// (`us`, `zh-tw`, ...) is skipped before the path is read.
     static func parseShortID(_ raw: String) -> String? {
         if let id = normalizeShortID(raw) { return id }
         guard let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
               let host = url.host?.lowercased(), host == "liveme.com" || host == "www.liveme.com" else { return nil }
-        let segments = url.pathComponents.filter { $0 != "/" }
+        let segments = stripLocale(url.pathComponents.filter { $0 != "/" })
         if segments.count >= 3, segments[segments.count - 3].lowercased() == "livehot",
            segments[segments.count - 2].lowercased() == "streaming" {
             return normalizeShortID(segments[segments.count - 1])
@@ -516,10 +634,19 @@ final class LiveMeSite: LiveSite, @unchecked Sendable {
         if let id = normalizeLongID(raw) { return id }
         guard let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
               let host = url.host?.lowercased(), host == "liveme.com" || host == "www.liveme.com" else { return nil }
-        let segments = url.pathComponents.filter { $0 != "/" }
+        let segments = stripLocale(url.pathComponents.filter { $0 != "/" })
         if segments.count == 2, segments[0].lowercased() == "u" {
             return normalizeLongID(segments[1])
         }
         return nil
+    }
+
+    /// Ref LiveMeLink.parse: drop a leading locale segment
+    /// (`us`, `zh-tw`) so `/us/livehot/streaming/<id>` and
+    /// `/us/u/<id>` resolve like the bare paths.
+    static func stripLocale(_ segments: [String]) -> [String] {
+        guard let first = segments.first,
+              first.range(of: #"^[a-zA-Z]{2}(?:-[a-zA-Z]{2,4})?$"#, options: .regularExpression) != nil else { return segments }
+        return Array(segments.dropFirst())
     }
 }

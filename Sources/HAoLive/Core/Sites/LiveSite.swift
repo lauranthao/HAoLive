@@ -47,6 +47,12 @@ protocol LiveSite: AnyObject, Sendable {
     /// getPlayUrls(liveroom:) reads it instead of re-fetching.
     func playURLs(room: LiveRoom) async throws -> [PlayStream]
 
+    /// End a playback-held session when the room closes: a
+    /// niconico watch seat or an FC2 control socket the adapter
+    /// kept open for the whole playback (Pure Live's seat /
+    /// control ownership). Default: no session to end.
+    func endPlaybackSession()
+
     /// Live danmaku stream for a room. Real adapters open the
     /// platform's danmaku channel and yield items as they arrive;
     /// the default implementation yields nothing, so rooms whose
@@ -57,6 +63,8 @@ protocol LiveSite: AnyObject, Sendable {
 }
 
 extension LiveSite {
+    func endPlaybackSession() {}
+
     func danmakuStream(roomID: String) -> AsyncStream<DanmakuItem> {
         AsyncStream { $0.finish() }
     }

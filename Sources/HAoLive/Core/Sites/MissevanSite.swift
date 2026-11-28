@@ -2,13 +2,13 @@
 // HAo Live — real 猫耳FM adapter (anonymous, no login).
 // Endpoints verified live from this VM 2026-11-28:
 //   categories  GET https://fm.missevan.com/api/v2/meta/data
-//               -> {code: 0, info: {tabs: [{type: catalog/tag,
-//                  catalog_id/tag_id, name, icon_url}]}} — tabs of
-//               other types (e.g. list) carry no usable id and are
-//               skipped. All responses are {code, info}; code != 0
+//               -> {code: 0, info: {tabs: [{type: catalog/tag/list,
+//                  catalog_id/tag_id/list_type, name, icon_url}]}} —
+//               list tabs (团播) are asked with type=. All responses
+//               are {code, info}; code != 0
 //               is an error, 500030004 means the room does not exist.
 //   list        GET /api/v2/chatroom/open/list?p={page}
-//               [&catalog_id=|&tag_id=] (server page size 20)
+//               [&catalog_id=|&tag_id=|&type=] (server page size 20)
 //               -> {info: {pagination: {count, maxpage, p, pagesize},
 //                  Datas: [{room_id, creator_id, name,
 //                  creator_username, cover_url, creator_iconurl,
@@ -23,8 +23,10 @@
 //                  channel: {flv_pull_url, hls_pull_url}}}} — the
 //               pull URLs carry an `expires` signature query; they
 //               are kept verbatim except for http -> https
-//               normalization. Exactly one quality ("原画"): the HLS
-//               line first, the FLV line second. Note: most 猫耳
+//               normalization. Exactly one quality ("原画"): the FLV
+//               line first, the HLS line second (wzgrx: the FLV
+//               connection outlives its signature, the HLS playlist
+//               does not). Note: most 猫耳
 //               broadcasts are audio-first (the video track is often
 //               a 16x16 placeholder + AAC); the player handles the
 //               actual tracks, the adapter does not guess.
@@ -45,6 +47,11 @@ final class MissevanSite: LiveSite, @unchecked Sendable {
     private static let apiBase = "https://fm.missevan.com/api/v2"
     private static let serverPageSize = 20
 
+    /// wzgrx MissevanApi.placeholderCover: the site's default picture
+    /// (a grey cat) that rows without a cover of their own carry — it
+    /// is left empty, never shown as a cover.
+    private static let placeholderCover = "https://static.maoercdn.com/avatars/icon01.png"
+
     // MARK: - Categories
 
     func categories() async throws -> [LiveCategory] {
@@ -52,15 +59,18 @@ final class MissevanSite: LiveSite, @unchecked Sendable {
         return Self.categories(fromMetaInfo: info)
     }
 
-    /// Pure parser for the meta/data tabs. Only catalog/tag tabs
-    /// carry an id the list endpoint accepts.
+    /// Pure parser for the meta/data tabs. Catalog/tag/list tabs
+    /// each carry an id the list endpoint accepts.
     static func categories(fromMetaInfo info: JSONValue) -> [LiveCategory] {
         var seen = Set<String>()
         var out: [LiveCategory] = []
         for tab in info["tabs"].arrayValue {
             let type = tab["type"].stringValue ?? ""
-            guard type == "catalog" || type == "tag",
-                  let id = tab["\(type)_id"].stringValue,
+            guard type == "catalog" || type == "tag" || type == "list" else { continue }
+            // wzgrx _tabId: catalog -> catalog_id, tag -> tag_id,
+            // list (团播) -> list_type.
+            let idField = type == "list" ? "list_type" : "\(type)_id"
+            guard let id = tab[idField].stringValue,
                   let name = tab["name"].stringValue, !name.isEmpty else { continue }
             let key = "\(type):\(id)"
             guard seen.insert(key).inserted else { continue }
@@ -96,8 +106,8 @@ final class MissevanSite: LiveSite, @unchecked Sendable {
     private func list(page: Int, category: LiveCategory?) async throws -> [LiveRoom] {
         guard page >= 1 else { return [] }
         var query = "p=\(page)"
-        if let category, let (type, id) = Self.categoryParam(from: category.id) {
-            query += "&\(type)_id=\(id)"
+        if let category, let (key, id) = Self.categoryParam(from: category.id) {
+            query += "&\(key)=\(id)"
         }
         let info = try await get("chatroom/open/list?\(query)")
         let maxPage = info["pagination"]["maxpage"].intValue ?? 0
@@ -105,14 +115,20 @@ final class MissevanSite: LiveSite, @unchecked Sendable {
         return info["Datas"].arrayValue.compactMap { Self.room(fromRow: $0, liveOnly: true) }
     }
 
-    /// "missevan-catalog:105" -> ("catalog", "105"); nil otherwise.
+    /// "missevan-catalog:105" -> ("catalog_id", "105");
+    /// "missevan-list:3" -> ("type", "3"). wzgrx namespaceQuery:
+    /// catalog -> catalog_id, tag -> tag_id, list -> type.
     static func categoryParam(from categoryID: String) -> (String, String)? {
         guard categoryID.hasPrefix("missevan-") else { return nil }
         let rest = String(categoryID.dropFirst("missevan-".count))
         let parts = rest.split(separator: ":", maxSplits: 1).map(String.init)
-        guard parts.count == 2, (parts[0] == "catalog" || parts[0] == "tag"),
-              !parts[1].isEmpty else { return nil }
-        return (parts[0], parts[1])
+        guard parts.count == 2, !parts[1].isEmpty else { return nil }
+        switch parts[0] {
+        case "catalog": return ("catalog_id", parts[1])
+        case "tag": return ("tag_id", parts[1])
+        case "list": return ("type", parts[1])
+        default: return nil
+        }
     }
 
     /// Pure parser for one list/search/detail row. `liveOnly` drops
@@ -124,6 +140,9 @@ final class MissevanSite: LiveSite, @unchecked Sendable {
         guard open == 0 || open == 1 else { return nil }
         let isLive = open == 1
         guard !liveOnly || isLive else { return nil }
+        // wzgrx _room: the placeholder cover is left empty.
+        let rawCover = Self.imageURL(row["cover_url"].stringValue)
+        let coverURL: URL? = rawCover?.absoluteString == Self.placeholderCover ? nil : rawCover
         return LiveRoom(
             id: "missevan-\(roomID)",
             platform: .missevan,
@@ -131,7 +150,7 @@ final class MissevanSite: LiveSite, @unchecked Sendable {
             title: row["name"].stringValue ?? "",
             anchorName: row["creator_username"].stringValue ?? "",
             anchorAvatarURL: Self.imageURL(row["creator_iconurl"].stringValue),
-            coverURL: Self.imageURL(row["cover_url"].stringValue),
+            coverURL: coverURL,
             categoryName: row["catalog_name"].stringValue,
             viewerCount: row["statistics"]["score"].intValue ?? 0,
             isLive: isLive
@@ -157,8 +176,12 @@ final class MissevanSite: LiveSite, @unchecked Sendable {
     }
 
     private func search(keyword: String, page: Int) async throws -> [LiveRoom] {
-        let term = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        var term = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty, page >= 1 else { return [] }
+        // wzgrx searchKeyword (13-4): at most 100 characters;
+        // control characters are refused.
+        guard !term.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) else { return [] }
+        if term.count > 100 { term = String(term.prefix(100)) }
         // A bare room id (or a fm.missevan.com/live/{id} link) resolves
         // directly to that room's detail.
         if let roomID = Self.roomID(from: term), page == 1 {
@@ -231,20 +254,28 @@ final class MissevanSite: LiveSite, @unchecked Sendable {
     func playURLs(room: LiveRoom) async throws -> [PlayStream] {
         let detail = try await fetchDetail(roomID: room.roomID)
         guard detail.room.isLive else { return [] }
-        let headers = PlaybackHeaders.headers(platform: .missevan, roomID: room.roomID)
+        // wzgrx MissevanApi.headers: UA Mozilla/5.0, Origin + Referer
+        // https://fm.missevan.com/ — not the PlaybackHeaders default
+        // (Chrome UA, /roomID Referer).
+        let headers = [
+            "user-agent": "Mozilla/5.0",
+            "origin": "https://fm.missevan.com",
+            "referer": "https://fm.missevan.com/",
+        ]
         var out: [PlayStream] = []
-        // HLS first (the engine prefers it), FLV second. Signed
-        // query parameters are kept verbatim; only the scheme is
-        // normalized to https (see mediaURL).
-        if let hls = detail.hlsURL, let url = Self.mediaURL(hls, kind: "hls") {
-            out.append(PlayStream(
-                url: url, quality: "原画", line: "HLS线路", headers: headers,
-                expiresAt: Self.expiresAt(of: url)
-            ))
-        }
+        // FLV first, HLS second (wzgrx qualities(): [flv, hls] — the
+        // FLV connection outlives its signature, the HLS playlist
+        // does not). Signed query parameters are kept verbatim; only
+        // the scheme is normalized to https (see mediaURL).
         if let flv = detail.flvURL, let url = Self.mediaURL(flv, kind: "flv") {
             out.append(PlayStream(
                 url: url, quality: "原画", line: "FLV线路", headers: headers,
+                expiresAt: Self.expiresAt(of: url)
+            ))
+        }
+        if let hls = detail.hlsURL, let url = Self.mediaURL(hls, kind: "hls") {
+            out.append(PlayStream(
+                url: url, quality: "原画", line: "HLS线路", headers: headers,
                 expiresAt: Self.expiresAt(of: url)
             ))
         }
@@ -261,6 +292,11 @@ final class MissevanSite: LiveSite, @unchecked Sendable {
               components.user == nil, components.fragment == nil else { return nil }
         let expectedSuffix = kind == "hls" ? ".m3u8" : ".flv"
         guard components.path.hasSuffix(expectedSuffix) else { return nil }
+        // wzgrx _isPullUrl: at most one `expires`, and when present it
+        // is exactly 10 digits.
+        let expiresValues = components.queryItems?.filter { $0.name == "expires" }.compactMap { $0.value } ?? []
+        guard expiresValues.count <= 1,
+              expiresValues.allSatisfy({ $0.count == 10 && $0.allSatisfy { $0.isNumber } }) else { return nil }
         components.scheme = "https"
         return components.url
     }
@@ -278,7 +314,12 @@ final class MissevanSite: LiveSite, @unchecked Sendable {
     /// GET an /api/v2 path; returns the `info` object. Throws
     /// roomNotFound on the API's nonexistent-room code.
     private func get(_ path: String) async throws -> JSONValue {
-        let json = try await http.getJSON("\(Self.apiBase)/\(path)")
+        // wzgrx MissevanApi.headers on every API call.
+        let json = try await http.getJSON("\(Self.apiBase)/\(path)", headers: [
+            "User-Agent": "Mozilla/5.0",
+            "Origin": "https://fm.missevan.com",
+            "Referer": "https://fm.missevan.com/",
+        ])
         guard let code = json["code"].intValue else { throw LiveSiteError.invalidResponse }
         if code == 500030004 { throw LiveSiteError.roomNotFound(path) }
         guard code == 0 else { throw LiveSiteError.message("猫耳FM返回错误 \(code)") }

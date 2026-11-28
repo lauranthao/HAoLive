@@ -302,8 +302,17 @@ private final class SharedRenewer: @unchecked Sendable {
 
 // MARK: - Relay
 
+/// One input served on the loopback relay: an FLV splicer or an
+/// HLS rewriter. The server only knows the path and the
+/// connection fd; the input owns everything below its path.
+protocol RelayRoute: AnyObject, Sendable {
+    var isClosed: Bool { get }
+    func serve(connectionFd: Int32, path: String)
+    func close()
+}
+
 /// A relayed FLV input served on the loopback relay.
-final class FlvRelayInput: @unchecked Sendable {
+final class FlvRelayInput: RelayRoute, @unchecked Sendable {
     /// The loopback URL the engine opens.
     let uri: URL
 
@@ -355,6 +364,12 @@ final class FlvRelayInput: @unchecked Sendable {
             splicer.cancel()
         }
         relay?.removeRoute(path: path)
+    }
+
+    /// RelayRoute dispatch: the FLV path is the input's own, so the
+    /// path is ignored.
+    func serve(connectionFd cfd: Int32, path: String) {
+        serve(connectionFd: cfd)
     }
 
     /// Serves one downstream connection on `connectionFd` until the
@@ -481,6 +496,282 @@ private final class SplicerBox: @unchecked Sendable {
     }
 }
 
+// MARK: - HLS relay (wzgrx live_media HlsRoute + bigoRelayRecipe)
+
+/// Given a media playlist's text, the segment restorer for its
+/// segments, or nil when they pass through unchanged. Throwing
+/// fails that playlist: a protection tag without a usable seed
+/// must never serve scrambled segments to the player.
+typealias HlsRestoreProvider = (String) throws -> HlsSegmentRestorer?
+/// Restores one segment's bytes (Bigo's descrambling).
+typealias HlsSegmentRestorer = ([UInt8]) throws -> [UInt8]
+
+private enum HlsEntryKind: Hashable {
+    case playlist
+    case segment
+    case map
+    case key
+}
+
+private struct HlsEntry {
+    var url: URL
+    var kind: HlsEntryKind
+    var restore: HlsSegmentRestorer?
+}
+
+/// One upstream answer fetched synchronously on a connection thread.
+private final class HlsFetchBox: @unchecked Sendable {
+    var result: (status: Int, data: Data)?
+}
+
+/// One HLS line served on the loopback relay (ref live_media
+/// HlsRoute, simplified: no prefetch window, no lease renewal —
+/// Bigo's address carries no expiry). Every playlist is fetched
+/// upstream with the line's headers and rewritten so its children
+/// point back here; segments of a protected media playlist go
+/// through the restorer. Only addresses taken from the line's own
+/// playlists are served — no open proxy.
+final class HlsRelayInput: RelayRoute, @unchecked Sendable {
+    /// The loopback URL the engine opens (the index playlist).
+    let uri: URL
+    /// The line the relay currently streams.
+    let line: PlayStream
+
+    private weak var relay: LoopbackRelay?
+    private let prefix: String
+    private let port: Int
+    private let restoreProvider: HlsRestoreProvider
+    private let lock = NSLock()
+    private var closed = false
+    private var entries: [String: HlsEntry] = [:]
+    private var names: [String: String] = [:]
+    private var mediaOrder: [String] = []
+    private var next = 0
+
+    /// Largest playlist / segment read upstream (ref HlsRoute:
+    /// 4 MiB playlists, 64 MiB restored segments).
+    private static let maxPlaylistBytes = 4 * 1024 * 1024
+    private static let maxSegmentBytes = 64 * 1024 * 1024
+    private static let maxEntries = 2048
+
+    var isClosed: Bool {
+        synchronized(lock) { closed } || relay?.isClosed ?? true
+    }
+
+    init(relay: LoopbackRelay, prefix: String, line: PlayStream, restoreProvider: @escaping HlsRestoreProvider) {
+        self.relay = relay
+        self.prefix = prefix
+        self.port = relay.port
+        self.line = line
+        self.restoreProvider = restoreProvider
+        self.uri = URL(string: "http://127.0.0.1:\(relay.port)\(prefix)index.m3u8")!
+    }
+
+    func close() {
+        let wasClosed = synchronized(lock) {
+            let was = closed
+            closed = true
+            return was
+        }
+        if !wasClosed { relay?.removeHlsRoute(prefix: prefix) }
+    }
+
+    func serve(connectionFd cfd: Int32, path: String) {
+        let name = path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : ""
+        guard !name.isEmpty, !name.contains("/") else {
+            _ = writeAll(cfd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        }
+        let entry: HlsEntry?
+        if name == "index.m3u8" {
+            entry = HlsEntry(url: line.url, kind: .playlist, restore: nil)
+        } else {
+            entry = synchronized(lock) { entries[name] }
+        }
+        guard let entry else {
+            _ = writeAll(cfd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        }
+        switch entry.kind {
+        case .playlist:
+            servePlaylist(cfd: cfd, entry: entry)
+        case .segment:
+            serveSegment(cfd: cfd, entry: entry)
+        case .map, .key:
+            serveRaw(cfd: cfd, entry: entry)
+        }
+    }
+
+    private func servePlaylist(cfd: Int32, entry: HlsEntry) {
+        guard let fetched = fetchUpstream(url: entry.url),
+              fetched.status == 200, fetched.data.count <= Self.maxPlaylistBytes else {
+            _ = writeAll(cfd, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        }
+        var text = String(decoding: fetched.data, as: UTF8.self)
+        // Ref HlsRoute.serve: a body that is not a playlist is a
+        // bad gateway, never served to the player as one.
+        guard text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("#EXTM3U") else {
+            _ = writeAll(cfd, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        }
+        let isMaster = text.contains("#EXT-X-STREAM-INF")
+        let restore: HlsSegmentRestorer?
+        do {
+            restore = isMaster ? nil : try restoreProvider(text)
+        } catch {
+            _ = writeAll(cfd, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        }
+        text = rewritePlaylist(text, base: entry.url, isMaster: isMaster, restore: restore)
+        let body = [UInt8](text.utf8)
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nCache-Control: no-store\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        guard writeAll(cfd, head) else { return }
+        _ = writeAll(cfd, body)
+    }
+
+    private func serveSegment(cfd: Int32, entry: HlsEntry) {
+        guard let fetched = fetchUpstream(url: entry.url),
+              fetched.status == 200, fetched.data.count <= Self.maxSegmentBytes else {
+            _ = writeAll(cfd, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        }
+        var bytes = [UInt8](fetched.data)
+        if let restore = entry.restore {
+            do {
+                bytes = try restore(bytes)
+            } catch {
+                _ = writeAll(cfd, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+            }
+        }
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: video/MP2T\r\nCache-Control: no-store\r\nContent-Length: \(bytes.count)\r\nConnection: close\r\n\r\n"
+        guard writeAll(cfd, head) else { return }
+        _ = writeAll(cfd, bytes)
+    }
+
+    private func serveRaw(cfd: Int32, entry: HlsEntry) {
+        guard let fetched = fetchUpstream(url: entry.url), fetched.status == 200 else {
+            _ = writeAll(cfd, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        }
+        let head = "HTTP/1.1 200 OK\r\nCache-Control: no-store\r\nContent-Length: \(fetched.data.count)\r\nConnection: close\r\n\r\n"
+        guard writeAll(cfd, head) else { return }
+        _ = writeAll(cfd, [UInt8](fetched.data))
+    }
+
+    /// Rewrites a playlist so its children point back here (ref
+    /// HlsRoute.rewrite): bare lines are playlist/segment refs;
+    /// URI="..." attributes of KEY/MAP/MEDIA lines are rewritten
+    /// the same way. Lines that do not resolve are left as they
+    /// are, exactly as the reference leaves them.
+    private func rewritePlaylist(_ text: String, base: URL, isMaster: Bool, restore: HlsSegmentRestorer?) -> String {
+        var out = ""
+        for rawLine in text.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty {
+                out += "\n"
+            } else if !line.hasPrefix("#") {
+                if let url = resolveURL(line, base: base) {
+                    let kind: HlsEntryKind = isMaster ? .playlist : .segment
+                    out += localURLString(for: url, kind: kind, restore: kind == .segment ? restore : nil) + "\n"
+                } else {
+                    out += rawLine + "\n"
+                }
+            } else if line.hasPrefix("#EXT-X-KEY") || line.hasPrefix("#EXT-X-MAP")
+                        || line.hasPrefix("#EXT-X-MEDIA") || line.hasPrefix("#EXT-X-I-FRAME-STREAM-INF") {
+                out += rewriteURIAttribute(line, base: base) + "\n"
+            } else {
+                out += rawLine + "\n"
+            }
+        }
+        return out
+    }
+
+    private func rewriteURIAttribute(_ line: String, base: URL) -> String {
+        guard let uriRange = line.range(of: "URI=\""),
+              let endQuote = line[uriRange.upperBound...].firstIndex(of: "\"") else { return line }
+        let reference = String(line[uriRange.upperBound..<endQuote])
+        guard let url = resolveURL(reference, base: base) else { return line }
+        let kind: HlsEntryKind = line.hasPrefix("#EXT-X-MAP") ? .map : .key
+        let local = localURLString(for: url, kind: kind, restore: nil)
+        return line.replacingCharacters(in: uriRange.upperBound..<endQuote, with: local)
+    }
+
+    private func resolveURL(_ reference: String, base: URL) -> URL? {
+        let trimmed = reference.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              let url = URL(string: trimmed, relativeTo: base)?.absoluteURL,
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return nil }
+        return url
+    }
+
+    /// The local name for an upstream URL of a kind (ref
+    /// HlsRoute._name): the same resource always gets the same
+    /// name; segments, maps and keys are remembered oldest-first
+    /// and dropped past maxEntries.
+    private func localURLString(for url: URL, kind: HlsEntryKind, restore: HlsSegmentRestorer?) -> String {
+        synchronized(lock) {
+            let key = "\(kind) \(url.absoluteString)"
+            if let known = names[key] {
+                if var entry = entries[known] {
+                    entry.restore = restore
+                    entries[known] = entry
+                }
+                return "http://127.0.0.1:\(port)\(prefix)\(known)"
+            }
+            let number = next
+            next += 1
+            let name: String
+            switch kind {
+            case .playlist:
+                name = "p\(number).m3u8"
+            case .segment:
+                name = "s\(number).\(url.pathExtension.isEmpty ? "ts" : url.pathExtension)"
+            case .map:
+                name = "m\(number).\(url.pathExtension.isEmpty ? "ts" : url.pathExtension)"
+            case .key:
+                name = "k\(number)"
+            }
+            names[key] = name
+            entries[name] = HlsEntry(url: url, kind: kind, restore: restore)
+            if kind != .playlist {
+                mediaOrder.append(name)
+                while mediaOrder.count > Self.maxEntries, let oldest = mediaOrder.first {
+                    mediaOrder.removeFirst()
+                    if let dropped = entries.removeValue(forKey: oldest) {
+                        names.removeValue(forKey: "\(dropped.kind) \(dropped.url.absoluteString)")
+                    }
+                }
+            }
+            return "http://127.0.0.1:\(port)\(prefix)\(name)"
+        }
+    }
+
+    /// One upstream GET with the line's headers, synchronously
+    /// (this runs on the connection's own thread, like
+    /// FlvRelayInput.serve). Nil on transport failure or timeout.
+    private func fetchUpstream(url: URL) -> (status: Int, data: Data)? {
+        var request = URLRequest(url: url, timeoutInterval: 20)
+        request.httpMethod = "GET"
+        for (field, value) in line.headers {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let box = HlsFetchBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        let task = URLSession.shared.dataTask(with: request) { data, response, _ in
+            if let http = response as? HTTPURLResponse, let data {
+                box.result = (http.statusCode, data)
+            }
+            semaphore.signal()
+        }
+        task.resume()
+        _ = semaphore.wait(timeout: .now() + 25)
+        return box.result
+    }
+}
+
 /// A loopback HTTP server for relayed FLV inputs: bound to 127.0.0.1
 /// only, one random unguessable path per input that stops working when
 /// the input closes.
@@ -490,7 +781,10 @@ final class LoopbackRelay: @unchecked Sendable {
 
     private let listenFd: Int32
     private let lock = NSLock()
-    private var routes: [String: FlvRelayInput] = [:]
+    /// Exact FLV paths ("/<secret>/live.flv").
+    private var routes: [String: any RelayRoute] = [:]
+    /// HLS prefixes ("/<secret>/"), each with one line.
+    private var hlsRoutes: [String: HlsRelayInput] = [:]
     private var closed = false
 
     /// Loopback port.
@@ -575,13 +869,33 @@ final class LoopbackRelay: @unchecked Sendable {
         synchronized(lock) { routes.removeValue(forKey: path) }
     }
 
+    /// Serves the HLS `line` (ref live_media HlsRoute + Bigo's
+    /// bigoRelayRecipe): playlists are rewritten to point back
+    /// here, and segments of a protected media playlist go through
+    /// the restorer from `restoreProvider`.
+    func openHls(
+        line: PlayStream,
+        restoreProvider: @escaping HlsRestoreProvider
+    ) -> HlsRelayInput {
+        precondition(!isClosed, "LoopbackRelay is closed")
+        let prefix = "/\(Self.randomSecret())/"
+        let input = HlsRelayInput(relay: self, prefix: prefix, line: line, restoreProvider: restoreProvider)
+        synchronized(lock) { hlsRoutes[prefix] = input }
+        return input
+    }
+
+    func removeHlsRoute(prefix: String) {
+        synchronized(lock) { hlsRoutes.removeValue(forKey: prefix) }
+    }
+
     /// Stops the server and every input.
     func close() {
-        let inputs: [FlvRelayInput] = synchronized(lock) {
+        let inputs: [any RelayRoute] = synchronized(lock) {
             if closed { return [] }
             closed = true
-            let current = Array(routes.values)
+            let current: [any RelayRoute] = Array(routes.values) + Array(hlsRoutes.values)
             routes.removeAll()
+            hlsRoutes.removeAll()
             return current
         }
         for input in inputs {
@@ -629,11 +943,15 @@ final class LoopbackRelay: @unchecked Sendable {
             return
         }
         let path = request.path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? request.path
-        let input = synchronized(lock) { routes[path] }
-        guard let input, !input.isClosed, !isClosed else {
-            _ = writeAll(connectionFd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        if let input = synchronized(lock, { routes[path] }), !input.isClosed, !isClosed {
+            input.serve(connectionFd: connectionFd, path: path)
             return
         }
-        input.serve(connectionFd: connectionFd)
+        if let input = synchronized(lock, { hlsRoutes.first { path.hasPrefix($0.key) }?.value }),
+           !input.isClosed, !isClosed {
+            input.serve(connectionFd: connectionFd, path: path)
+            return
+        }
+        _ = writeAll(connectionFd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
     }
 }

@@ -18,10 +18,15 @@
 //           getImmediatePlayToM&t={ms}&body={"liveId":{id}} ->
 //           {code: "0", subCode: "0", data: {liveId, status,
 //           secret (1 = app-only, unplayable), h5VideoUrl (.m3u8),
-//           videoUrl (.flv)}}. The HLS playlist is fetched once and
-//           validated (#EXTM3U, child refs on the same host under
-//           /live/ with the same stream stem). Only one tier: HLS
-//           "原画". ⚠️ VM 2026-11-28: getImmediatePlayToM timed out
+//           videoUrl / pcVideoUrl (.flv)}}. Qualities (ref): live =
+//           HLS（推荐） then FLV 原始线路 (FLV = videoUrl else
+//           pcVideoUrl, same stream stem as the HLS playlist when
+//           there is one); replay (status 3) = its recording
+//           (.m3u8 on *.300hu.com). The HLS playlist is fetched once
+//           and validated (#EXTM3U, child refs on the same host under
+//           /live/ with the same stream stem); play answer + playlist
+//           share one 20 s budget (ref _scoped). ⚠️ VM 2026-11-28:
+//           getImmediatePlayToM timed out
 //           twice (curl 30s, python 20s) while the list endpoint
 //           answers fine — needs a domestic real-device check.
 // Danmaku: NOT implemented — the reference chat auth AES-encrypts
@@ -57,9 +62,10 @@ final class JDSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Categories
 
-    /// No category tree — a single featured directory.
+    /// One category, one area (ref: category "JD Live", area
+    /// "featured" / 精选直播购物 — the featured list below).
     func categories() async throws -> [LiveCategory] {
-        []
+        [LiveCategory(id: "featured", platform: .jdlive, name: "精选直播购物", iconName: nil)]
     }
 
     // MARK: - Lists
@@ -123,7 +129,9 @@ final class JDSite: LiveSite, @unchecked Sendable {
         guard let nextCount = data["currentCount"].intValue else {
             throw LiveSiteError.invalidResponse
         }
-        return DirectoryPage(rooms: rooms, nextCount: nextCount, hasMore: rooms.count >= Self.pageSize)
+        // Ref directory(): another page while this one had broadcasts
+        // and currentCount moved on.
+        return DirectoryPage(rooms: rooms, nextCount: nextCount, hasMore: !rooms.isEmpty && nextCount > currentCount)
     }
 
     // MARK: - Search
@@ -195,20 +203,60 @@ final class JDSite: LiveSite, @unchecked Sendable {
 
     func playURLs(room: LiveRoom) async throws -> [PlayStream] {
         guard let liveID = Self.validLiveID(room.roomID) else { return [] }
+        // Ref _scoped: the play answer and the playlist share one
+        // 20 s deadline; the playlist fetch gets what is left of it.
+        let startedAt = Date()
         let data = try await fetchRoomData(liveID)
-        guard Self.state(of: data) == .live, !Self.isAppOnly(data) else { return [] }
-        guard let hlsString = data["h5VideoUrl"].stringValue,
-              let hlsURL = Self.validMediaURL(hlsString) else { return [] }
-        // Validate the playlist once before handing it to the player.
-        let playlistData = try await http.get(hlsString, headers: Self.mediaHeaders(for: liveID))
-        guard let playlist = String(data: playlistData, encoding: .utf8),
-              Self.isValidPlaylist(playlist, expected: hlsURL) else { return [] }
-        return [PlayStream(
-            url: hlsURL,
-            quality: "原画",
-            line: "主线路",
-            headers: Self.mediaHeaders(for: liveID)
-        )]
+        guard !Self.isAppOnly(data) else { return [] }
+        if Self.state(of: data) == .replay {
+            // Ref: a replay plays its recording — the first .m3u8 on
+            // *.300hu.com among h5VideoUrl / videoUrl / pcVideoUrl.
+            // The recording is not downloaded or checked beforehand.
+            guard let recording = ["h5VideoUrl", "videoUrl", "pcVideoUrl"]
+                .compactMap({ Self.validRecordingURL(data[$0].stringValue) }).first else { return [] }
+            return [PlayStream(
+                url: recording,
+                quality: "原画",
+                line: "主线路",
+                headers: Self.mediaHeaders(for: liveID)
+            )]
+        }
+        guard Self.state(of: data) == .live else { return [] }
+        let hlsURL = data["h5VideoUrl"].stringValue.flatMap(Self.validMediaURL)
+        // FLV fallback (ref 28-4): videoUrl, else pcVideoUrl, with the
+        // same stream stem as the HLS playlist when there is one.
+        var flvURL: URL? = nil
+        for field in ["videoUrl", "pcVideoUrl"] {
+            guard let candidate = data[field].stringValue.flatMap(Self.validFLVURL) else { continue }
+            if hlsURL == nil || Self.streamStem(of: candidate) == Self.streamStem(of: hlsURL!) {
+                flvURL = candidate
+                break
+            }
+        }
+        var streams: [PlayStream] = []
+        if let hlsURL {
+            // Validate the playlist once before handing it to the player.
+            let elapsed = Date().timeIntervalSince(startedAt)
+            let playlistTimeout = max(5, 20 - elapsed)
+            let playlistData = try await http.get(hlsURL.absoluteString, headers: Self.mediaHeaders(for: liveID), timeout: playlistTimeout)
+            guard let playlist = String(data: playlistData, encoding: .utf8),
+                  Self.isValidPlaylist(playlist, expected: hlsURL) else { throw LiveSiteError.invalidResponse }
+            streams.append(PlayStream(
+                url: hlsURL,
+                quality: "HLS（推荐）",
+                line: "主线路",
+                headers: Self.mediaHeaders(for: liveID)
+            ))
+        }
+        if let flvURL {
+            streams.append(PlayStream(
+                url: flvURL,
+                quality: "FLV 原始线路",
+                line: "主线路",
+                headers: Self.mediaHeaders(for: liveID)
+            ))
+        }
+        return streams
     }
 
     // MARK: - Pure parsers
@@ -252,12 +300,12 @@ final class JDSite: LiveSite, @unchecked Sendable {
     }
 
     /// Pure parser for a directory card (templateType == 1). The
-    /// card's data.id must equal its liveId; only live rows are kept
-    /// by the caller (status == 1).
+    /// card's data.id must equal its liveId. Rows of any status are
+    /// kept (ref _card / room(): status 1 = live, 0 preview, 2 ended,
+    /// 3 replay, 10/11 paused); isLive is status == 1.
     static func room(fromListItem item: JSONValue) -> LiveRoom? {
         guard let liveID = validLiveID(item["liveId"].stringValue ?? ""),
               item["id"].stringValue == liveID else { return nil }
-        guard item["status"].intValue == 1 else { return nil }
         let nick = item["userName"].stringValue ?? ""
         return LiveRoom(
             id: "jdlive-\(liveID)",
@@ -269,7 +317,7 @@ final class JDSite: LiveSite, @unchecked Sendable {
             coverURL: Self.imageURL(item["indexImage"].stringValue),
             categoryName: nil,
             viewerCount: item["pv"].intValue ?? 0,
-            isLive: true
+            isLive: item["status"].intValue == 1
         )
     }
 
@@ -300,6 +348,29 @@ final class JDSite: LiveSite, @unchecked Sendable {
               let host = url.host?.lowercased(),
               host == "jdcloud.com" || host.hasSuffix(".jdcloud.com"),
               url.path.hasPrefix("/live/"),
+              url.path.lowercased().hasSuffix(".m3u8") else { return nil }
+        return url
+    }
+
+    /// FLV URL kept verbatim when valid: https, *.jdcloud.com host,
+    /// /live/ path, .flv suffix (ref _media(value, ".flv")).
+    static func validFLVURL(_ raw: String?) -> URL? {
+        guard let raw, let url = URL(string: raw), url.scheme == "https",
+              url.user == nil, url.password == nil, url.fragment == nil,
+              let host = url.host?.lowercased(),
+              host == "jdcloud.com" || host.hasSuffix(".jdcloud.com"),
+              url.path.hasPrefix("/live/"),
+              url.path.lowercased().hasSuffix(".flv") else { return nil }
+        return url
+    }
+
+    /// A replay's recording: .m3u8 on JD Cloud's video service
+    /// (*.300hu.com) (ref _recording).
+    static func validRecordingURL(_ raw: String?) -> URL? {
+        guard let raw, let url = URL(string: raw), url.scheme == "https",
+              url.user == nil, url.password == nil, url.fragment == nil,
+              let host = url.host?.lowercased(),
+              host == "300hu.com" || host.hasSuffix(".300hu.com"),
               url.path.lowercased().hasSuffix(".m3u8") else { return nil }
         return url
     }

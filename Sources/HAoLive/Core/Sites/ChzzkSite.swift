@@ -6,8 +6,8 @@
 //              liveImageUrl, liveCategoryValue, concurrentUserCount,
 //              adult, channel: {channelId (32 hex), channelName,
 //              channelImageUrl}}], page: {next: {concurrentUserCount,
-//              liveId}}}} (cursor paging: next is inclusive, so the
-//              boundary row is skipped on the following page)
+//              liveId}}}} (cursor paging: next is exclusive (ref 20-6);
+//              the boundary row is dropped as a guard)
 //   search  GET api.chzzk.naver.com/service/v1/search/channels
 //           ?keyword=&offset=&size= -> content.data[] each
 //           {channel: {...}} (channel cards, may be offline)
@@ -19,13 +19,15 @@
 //           timeMachineActive, livePlaybackJson (a JSON *string*),
 //           chatChannelId}; livePlaybackJson.media[] holds the HLS
 //           master URLs (mediaId HLS / LLHLS, protocol HLS).
-//   play    fetch each media.url master m3u8, parse its
-//           #EXT-X-STREAM-INF variants into qualities, grouped by
-//           {height}p{60?} (verified: 144p/360p/480p/720p60/1080p60
-//           from one master). adult && media empty = adult-verified
-//           room, skipped (no playable URL); krOnlyViewing = region
-//           restricted, likewise unplayable.
-//   Headers: UA + Origin/Referer https://chzzk.naver.com.
+//   play    fetch each media.url master m3u8 (together in the ref;
+//           here one after another), parse its #EXT-X-STREAM-INF
+//           variants into qualities "{height}p{60?} · HLS", one line
+//           per media (HLS / LLHLS) (verified: 144p/360p/480p/720p60/
+//           1080p60 from one master). adult && media empty =
+//           adult-verified room, skipped (no playable URL);
+//           krOnlyViewing = region restricted, likewise unplayable.
+//   Headers: API = desktop Chrome UA + Origin/Referer
+//           https://chzzk.naver.com; media = same UA + Referer, no Origin.
 // Danmaku: Naver chat WebSocket — see ChzzkDanmaku.swift.
 
 import Foundation
@@ -42,11 +44,13 @@ final class ChzzkSite: LiveSite, @unchecked Sendable {
     private static let pageSize = 30
     private static let searchPageSize = 20
 
+    // Ref headers (chzzk_api.dart ChzzkApi.headers): desktop Chrome UA
+    // + Origin/Referer. HTTPClient would otherwise send its macOS UA.
     private static var headers: [String: String] {
-        ["Origin": webBase, "Referer": "\(webBase)/"]
+        ["User-Agent": PlaybackHeaders.desktopUA, "Origin": webBase, "Referer": "\(webBase)/"]
     }
 
-    /// One directory cursor: the server cursor is inclusive
+    /// One directory cursor: the server cursor is exclusive (ref 20-6)
     /// (concurrentUserCount + liveId of the last row seen).
     private struct Cursor {
         let viewers: Int
@@ -106,7 +110,8 @@ final class ChzzkSite: LiveSite, @unchecked Sendable {
         guard json["code"].intValue == 200 else { throw LiveSiteError.invalidResponse }
         let content = json["content"]
         var rows = content["data"].arrayValue
-        // The server cursor is inclusive: drop the repeated boundary row.
+        // The server cursor is exclusive (ref 20-6); drop a repeated
+        // boundary row if the server sends one anyway.
         if let cursor {
             rows.removeAll { $0["liveId"].intValue == cursor.liveId }
         }
@@ -140,7 +145,8 @@ final class ChzzkSite: LiveSite, @unchecked Sendable {
     }
 
     private func search(keyword: String, page: Int = 1) async throws -> [LiveRoom] {
-        let query = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Ref searchKeyword: trim, cut to 100 characters.
+        let query = String(keyword.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
         guard !query.isEmpty, page >= 1 else { return [] }
         let offset = (page - 1) * Self.searchPageSize
         let json = try await http.getJSON(Self.urlWithQuery("\(Self.apiBase)/service/v1/search/channels", [
@@ -171,7 +177,10 @@ final class ChzzkSite: LiveSite, @unchecked Sendable {
     /// The channel object (/service/v1/channels/{id}).
     private func fetchChannel(_ channelID: String) async throws -> JSONValue {
         let json = try await http.getJSON("\(Self.apiBase)/service/v1/channels/\(channelID)", headers: Self.headers)
-        guard json["code"].intValue == 200, !json["content"].isNull else {
+        // Ref channel(): a 200 with a null / mismatched channelId is
+        // NotFound (unknown ids answer 200 with channelId null).
+        guard json["code"].intValue == 200, !json["content"].isNull,
+              json["content"]["channelId"].stringValue == channelID else {
             throw LiveSiteError.roomNotFound(channelID)
         }
         return json["content"]
@@ -189,41 +198,62 @@ final class ChzzkSite: LiveSite, @unchecked Sendable {
     // MARK: - Play URLs
 
     func playURLs(room: LiveRoom) async throws -> [PlayStream] {
-        guard let channelID = Self.validChannelID(room.roomID),
-              let live = try? await fetchLiveDetail(channelID),
-              Self.isLiveStatus(live["status"].stringValue) else { return [] }
+        guard let channelID = Self.validChannelID(room.roomID) else { return [] }
+        // Ref: a failed detail fetch is an error, never an offline room
+        // (chzzk_site.dart throws NetworkFailure / ApiChanged). Only a
+        // null content (never been live) or a non-OPEN status yields [].
+        guard let live = try await fetchLiveDetail(channelID) else { return [] }
+        guard Self.isLiveStatus(live["status"].stringValue) else { return [] }
         let detail = live
         let media = Self.playbackMedia(fromLivePlaybackJSON: detail["livePlaybackJson"].stringValue ?? "")
         // Adult-verified rooms and region-restricted rooms carry no media.
         guard !media.isEmpty else { return [] }
-        let headers = PlaybackHeaders.headers(platform: .chzzk, roomID: channelID)
+        // Ref mediaHeaders (chzzk_api.dart): desktop Chrome UA + Referer,
+        // no Origin — for the master fetches and the stream lines alike.
+        let headers = ["User-Agent": PlaybackHeaders.desktopUA, "Referer": "\(Self.webBase)/"]
         var builders: [String: QualityBuilder] = [:]
+        var firstMasterError: (any Error)?
         for item in media {
             guard let masterURL = URL(string: item.url) else { continue }
-            guard let textData = try? await http.get(item.url, headers: ["Referer": "\(Self.webBase)/"]),
-                  let text = String(data: textData, encoding: .utf8) else { continue }
+            let text: String
+            do {
+                let textData = try await http.get(item.url, headers: headers)
+                guard let decoded = String(data: textData, encoding: .utf8) else { continue }
+                text = decoded
+            } catch {
+                // Ref _fetchQualities: one failed master only loses its
+                // lines; when every master fails, the first error is thrown.
+                if firstMasterError == nil { firstMasterError = error }
+                continue
+            }
             for variant in Self.parseMasterPlaylist(text, baseURL: masterURL) {
-                let key = "\(variant.height)p\(variant.fps >= 50 ? "60" : "")"
+                // Ref qualities(): quality "<height>p[60] · HLS", one line
+                // per media (lineId HLS / LLHLS), ranked by height, then
+                // by the bandwidth of its first variant, best first.
+                let quality = "\(variant.height)p\(variant.fps >= 50 ? "60" : "") · HLS"
                 let rank = variant.height * 10_000_000 + variant.bandwidth
+                let key = "\(quality)|\(item.id)"
                 if builders[key] == nil {
-                    builders[key] = QualityBuilder(rank: rank, line: item.lowLatency ? "低延迟" : "主线路")
+                    builders[key] = QualityBuilder(quality: quality, rank: rank, line: item.id)
                 }
                 if !builders[key]!.urls.contains(variant.url) {
                     builders[key]!.urls.append(variant.url)
                 }
             }
         }
-        return Self.streams(fromBuilders: builders, headers: headers)
+        let streams = Self.streams(fromBuilders: builders, headers: headers)
+        if streams.isEmpty, let error = firstMasterError { throw error }
+        return streams
     }
 
-    /// Quality key -> streams, best first. Pure builder, testable
+    /// Quality -> streams, best first. Pure builder, testable
     /// without the network.
     static func streams(fromBuilders builders: [String: QualityBuilder], headers: [String: String]) -> [PlayStream] {
-        let sorted = builders.sorted { $0.value.rank > $1.value.rank }
+        let sorted = builders.values.sorted { $0.rank > $1.rank }
         var streams: [PlayStream] = []
-        for (key, builder) in sorted {
+        for builder in sorted {
             for url in builder.urls {
-                streams.append(PlayStream(url: url, quality: key, line: builder.line, headers: headers))
+                streams.append(PlayStream(url: url, quality: builder.quality, line: builder.line, headers: headers))
             }
         }
         return streams
@@ -241,8 +271,11 @@ final class ChzzkSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Pure parsers
 
-    /// One quality's variant URLs, in master order.
+    /// One quality's variant URLs, in master order. `quality` is the
+    /// display name ("1080p60 · HLS"); `line` is the media id
+    /// ("HLS" / "LLHLS"), one builder per media.
     struct QualityBuilder {
+        var quality: String = ""
         let rank: Int
         let line: String
         var urls: [URL] = []

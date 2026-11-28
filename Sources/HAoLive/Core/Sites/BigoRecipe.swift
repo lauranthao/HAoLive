@@ -35,14 +35,14 @@
 // Directory + detail still work; playback is blocked on that step.
 //
 // The HLS protection: when a Bigo master carries
-// #EXT-X-BIGO-WEB-PROTECTION:SEED=n, the first 376 bytes of each
-// segment are XOR-masked (Pure Live's BigoHlsProtection, applied
-// in their ffmpeg relay before the bytes reach the player).
-// HAoLive's mpv player has no such transform step, so a protected
-// stream would play with its first two TS packets garbled per
-// segment. The transform is implemented here (and is its own
-// inverse) so the player layer can apply it later; playURLs
-// returns the hls_src verbatim and does NOT pretend otherwise.
+// #EXT-X-BIGO-WEB-PROTECTION:VERSION=1,SEED=n, the first 376 bytes
+// of each segment are XOR-masked (Pure Live's BigoHlsProtection,
+// applied in their ffmpeg relay before the bytes reach the
+// player). HAoLive applies the same step in LoopbackRelay.openHls
+// (LivePlayerService relays every Bigo line through it): the
+// transform is implemented here (and is its own inverse), the
+// relay calls it per segment; playURLs returns the hls_src with
+// needsHlsSegmentRestore so the player knows to relay it.
 
 import Foundation
 
@@ -235,8 +235,11 @@ enum BigoTokenCodec {
         return JSONValue.parse(data)
     }
 
+    /// The JSONP callback name of a request made now (ref
+    /// bigo_api.callbackName: jsonpcallback_<ms>_<µs % 1_000_000>).
     static func callbackName() -> String {
-        "jsonpcallback_\(Int(Date().timeIntervalSince1970 * 1000))_\(Int.random(in: 0..<1_000_000))"
+        let microseconds = Int(Date().timeIntervalSince1970 * 1_000_000)
+        return "jsonpcallback_\(microseconds / 1_000)_\(microseconds % 1_000_000)"
     }
 }
 
@@ -248,15 +251,26 @@ enum BigoTokenCodec {
 enum BigoHlsProtection {
     /// The SEED=… tag of a protected manifest, or nil when the
     /// manifest is unprotected. Throws on a malformed seed.
+    /// Ref bigo_api.BigoHlsProtection.seed: the seed is read from
+    /// the tag's attribute list, so `VERSION=1,SEED=n` (the form
+    /// the site sends today, fixture S04-playlist) works — the old
+    /// code required `SEED=` immediately after the colon and
+    /// missed it, leaving segments scrambled.
     static func seed(fromManifest manifest: String) throws -> Int? {
         for line in manifest.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.uppercased().hasPrefix("#EXT-X-BIGO-WEB-PROTECTION:SEED=") else { continue }
-            let valueText = String(trimmed.dropFirst("#EXT-X-BIGO-WEB-PROTECTION:SEED=".count))
-            guard let value = Int(valueText), value >= 0, value <= 0xFFFF_FFFF else {
-                throw LiveSiteError.invalidResponse
+            guard trimmed.uppercased().hasPrefix("#EXT-X-BIGO-WEB-PROTECTION:") else { continue }
+            let attributes = String(trimmed.dropFirst("#EXT-X-BIGO-WEB-PROTECTION:".count))
+            for part in attributes.split(separator: ",") {
+                let field = part.trimmingCharacters(in: .whitespaces)
+                guard field.uppercased().hasPrefix("SEED=") else { continue }
+                let valueText = String(field.dropFirst("SEED=".count)).trimmingCharacters(in: .whitespaces)
+                guard let value = Int(valueText), value >= 0, value <= 0xFFFF_FFFF else {
+                    throw LiveSiteError.invalidResponse
+                }
+                return value
             }
-            return value
+            throw LiveSiteError.invalidResponse
         }
         return nil
     }
@@ -307,6 +321,9 @@ struct BigoStudioRoom {
     let nickname: String
     let title: String
     let category: String
+    /// `roomType` ("1" ends the live; the chat is not opened for
+    /// it — ref bigo_api.danmakuArgs).
+    let roomType: String
     let avatarURL: String?
     let snapshotURL: String
     let hlsURL: URL?
@@ -338,8 +355,12 @@ enum BigoRecipe {
            let scheme = url.scheme?.lowercased(),
            ["http", "https"].contains(scheme),
            let host = url.host?.lowercased(),
-           (host == "bigo.tv" || host == "www.bigo.tv"),
-           url.user == nil, url.password == nil, url.fragment == nil {
+           // Ref bigo_api.siteIdFromUrl: bigo.tv or any of its
+           // subdomains (www, m, ...), default port only, no user
+           // info; a fragment is ignored (24-7), not a refusal.
+           (host == "bigo.tv" || host.hasSuffix(".bigo.tv")),
+           url.user == nil, url.password == nil,
+           url.port == nil || url.port == (scheme == "https" ? 443 : 80) {
             let segments = url.pathComponents.filter { $0 != "/" }
             let reserved = ["about", "download", "index", "live", "login", "search", "signup"]
             let candidate: String?
@@ -395,11 +416,25 @@ enum BigoRecipe {
     /// Throws when the token flow fails — there is no token-less
     /// fallback: without a token the room call answers with empty
     /// fields (verified live 2026-11-28).
+    /// Ref bigo_site._studio: the site sometimes answers a token's
+    /// first use with `needLogin` and accepts the same token a
+    /// moment later, so a login-gated first answer is asked once
+    /// more with the same token; the gate is kept, but the state
+    /// comes from the second answer (BigoStudio.gated).
     static func studioRoom(siteID: String, http: HTTPClient) async throws -> BigoStudioRoom {
         guard let siteID = validateSiteID(siteID) else {
             throw LiveSiteError.roomNotFound(siteID)
         }
         let token = try await webToken(http: http)
+        let first = try await askStudio(siteID: siteID, token: token, http: http)
+        guard first.access == .loginRequired else { return first }
+        let again = try await askStudio(siteID: siteID, token: token, http: http)
+        guard again.access != .loginRequired else { return first }
+        return gated(again)
+    }
+
+    /// One getInternalStudioInfo call with a token.
+    private static func askStudio(siteID: String, token: String, http: HTTPClient) async throws -> BigoStudioRoom {
         let encoded = token.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? token
         let url = "\(origin)/studio/getInternalStudioInfo?siteId=\(siteID)&verify=&token=\(encoded)"
         let data = try await http.postForm(url, fields: [:], headers: headers)
@@ -408,6 +443,30 @@ enum BigoRecipe {
             throw LiveSiteError.invalidResponse
         }
         return room
+    }
+
+    /// The login gate of `room` kept, with the state of its second
+    /// answer (ref BigoStudio.gated): the playlist is dropped, so
+    /// the room still cannot play, but it is no longer shown with
+    /// a zeroed state.
+    private static func gated(_ room: BigoStudioRoom) -> BigoStudioRoom {
+        BigoStudioRoom(
+            siteID: room.siteID,
+            canonicalSiteID: room.canonicalSiteID,
+            ownerID: room.ownerID,
+            access: .loginRequired,
+            isPassword: room.isPassword,
+            isPaid: room.isPaid,
+            isAlive: room.isAlive,
+            roomID: room.roomID,
+            nickname: room.nickname,
+            title: room.title,
+            category: room.category,
+            roomType: room.roomType,
+            avatarURL: room.avatarURL,
+            snapshotURL: room.snapshotURL,
+            hlsURL: nil
+        )
     }
 
     /// Pure parser for getInternalStudioInfo. Returns nil when the
@@ -430,7 +489,16 @@ enum BigoRecipe {
             access = .public
         }
         let aliveValue = data["alive"].intValue
-        let isAlive: Bool? = access == .public ? (aliveValue == 1) : nil
+        // Ref bigo_api.studio alive mapping: the login gate hides
+        // it (nil); a restricted room that says alive is live
+        // (true), otherwise unknown (nil); a public room reports
+        // it directly. The old code nulled it for every restricted
+        // room, so a live password/paid room read as unknown.
+        let isAlive: Bool? = switch access {
+        case .loginRequired: nil
+        case .restricted: aliveValue == 1 ? true : nil
+        case .public: aliveValue == 1
+        }
         let rawHLS = data["hls_src"].stringValue ?? ""
         let hls: URL?
         if access == .public, isAlive == true, !rawHLS.isEmpty,
@@ -456,6 +524,7 @@ enum BigoRecipe {
             nickname: data["nick_name"].stringValue ?? "",
             title: data["roomTopic"].stringValue ?? "",
             category: data["gameTitle"].stringValue ?? "",
+            roomType: data["roomType"].stringValue ?? "",
             avatarURL: avatar.isEmpty ? nil : avatar,
             snapshotURL: snapshot,
             hlsURL: hls

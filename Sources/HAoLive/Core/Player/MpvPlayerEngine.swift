@@ -82,6 +82,15 @@ import UIKit
 
     private(set) var renderPath: RenderPath = .sw
 
+    /// The decoder mpv is actually using (mpv `hwdec-current`:
+    /// "videotoolbox" / "videotoolbox-copy" / "no" = software decode).
+    /// Written from the event loop (nonisolated), read on the main
+    /// actor by the service's display name. Empty until the first
+    /// property event arrives. Build 11 never read this: a silent
+    /// software-decode fallback — the prime 原画 lag suspect — was
+    /// invisible next to the render path.
+    nonisolated(unsafe) var hwdecCurrent: String = ""
+
     /// A presented-frame stall marks the mpv engine unusable
     /// (canPlay false) so the sweep does not retry the same dead
     /// GPU path on the next candidate. The service recreates the
@@ -280,20 +289,27 @@ import UIKit
         // by wzgrx at all. The old per-open force-seekable=no /
         // cache-pause=no / demuxer-lavf-format=hls lines undid
         // the table and are deleted.
-        setOption(handle, "http-proxy", "")
+        // Per-open, as properties (wzgrx MpvEngine.open): hwdec follows
+        // the setting, http-proxy empty, volume-gain 0 (HAoLive has no
+        // gain setting). These MUST be properties, not options — see
+        // setPropertyString. The old code set http-proxy / headers /
+        // user-agent with setOption after initialize.
+        setPropertyString(handle, "hwdec", Self.hwdecMode)
+        setPropertyString(handle, "http-proxy", "")
+        setPropertyString(handle, "volume-gain", "0")
         if !headers.isEmpty {
             // "Field: value, Field: value" — our headers carry no commas.
             let fields = headers
                 .sorted { $0.key < $1.key }
                 .map { "\($0.key): \($0.value)" }
                 .joined(separator: ", ")
-            setOption(handle, "http-header-fields", fields)
+            setPropertyString(handle, "http-header-fields", fields)
             // Header keys arrive lowercase from PlaybackHeaders
             // ("user-agent"), so look the UA up case-insensitively —
             // the exact-case lookup silently never matched, and mpv
             // fell back to its default UA.
             if let userAgent = headers.first(where: { $0.key.lowercased() == "user-agent" })?.value {
-                setOption(handle, "user-agent", userAgent)
+                setPropertyString(handle, "user-agent", userAgent)
             }
         }
         // mpv_command takes const char **: the array must hold
@@ -357,23 +373,34 @@ import UIKit
 
     private func applyOptions(_ handle: OpaquePointer) {
         // wzgrx MpvEngineConfig.liveProperties, verbatim
-        // (packages/live_player/lib/src/mpv_options.dart). iOS-only
-        // additions, marked: vo=libmpv is the render API the GL path
-        // needs (wzgrx iOS has only libmpv as video output driver);
-        // ao=audiounit is mpv's iOS default (wzgrx leaves ao unset
-        // on iOS). Everything else is exactly wzgrx's table — the
-        // old 3.x values (2 MiB probe, 30 s cache, 8 s readahead,
-        // 96 MB buffer, low-end lowres preset, framedrop) are gone:
-        // wzgrx measured first frame 1802 ms -> 708 ms with the
-        // 1 MiB / 1 s probe, and plays 原画 on these values.
+        // (packages/live_player/lib/src/mpv_options.dart), plus the
+        // media_kit defaults the reference inherits (third_party/
+        // media_kit/lib/.../real.dart _create properties, marked
+        // "media_kit"): scale/dscale/dither/hr-seek/demuxer-lavf-o.
+        // iOS-only addition, marked: vo=libmpv is the render API
+        // the GL path needs (wzgrx iOS has only libmpv as video
+        // output driver; media_kit_video defaults vo to 'libmpv'
+        // and sets it as a property). ao is left unset like wzgrx
+        // (mpv's iOS default is audiounit). Everything else is
+        // exactly wzgrx's table — the old 3.x values (2 MiB probe,
+        // 30 s cache, 8 s readahead, 96 MB buffer, low-end lowres
+        // preset, framedrop) are gone: wzgrx measured first frame
+        // 1802 ms -> 708 ms with the 1 MiB / 1 s probe, and plays
+        // 原画 on these values.
         setOption(handle, "vo", "libmpv") // iOS render API (see above)
-        setOption(handle, "ao", "audiounit") // iOS default (see above)
         // hwdec follows the setting (Pure Live's hwdec setting:
         // auto / auto-safe / no; wzgrx default auto-safe).
         setOption(handle, "hwdec", Self.hwdecMode)
         setOption(handle, "hwdec-software-fallback", "1")
         setOption(handle, "force-seekable", "yes")
-        setOption(handle, "protocol-whitelist", "httpproxy,udp,rtp,tcp,tls,data,file,http,https,crypto,rtmp,rtmps,rtsp,srt")
+        // media_kit: demuxer-lavf-o carries the protocol whitelist
+        // (plus seg_max_retry and allowed_extensions). The old
+        // top-level "protocol-whitelist" line is deleted: mpv has no
+        // such top-level option (protocol_whitelist is a libavformat
+        // option), so the set was a silent no-op — FFmpeg's default
+        // already allows these top-level protocols, which is why
+        // nothing visibly broke.
+        setOption(handle, "demuxer-lavf-o", "seg_max_retry=5,strict=experimental,allowed_extensions=ALL,protocol_whitelist=[httpproxy,udp,rtp,tcp,tls,data,file,http,https,crypto,rtmp,rtmps,rtsp,srt]")
         setOption(handle, "demuxer-lavf-probesize", "1048576")
         setOption(handle, "demuxer-lavf-analyzeduration", "1")
         setOption(handle, "network-timeout", "15")
@@ -384,6 +411,19 @@ import UIKit
         setOption(handle, "demuxer-max-back-bytes", "4194304")
         setOption(handle, "demuxer-donate-buffer", "no")
         setOption(handle, "demuxer-readahead-secs", "2")
+        // media_kit defaults (real.dart _create), which the reference
+        // inherits: cheap bilinear scaling, no dithering / downscaling
+        // correction, hr-seek without framedrop. HAoLive used to rely
+        // on mpv's built-in defaults for these instead.
+        setOption(handle, "scale", "bilinear")
+        setOption(handle, "dscale", "bilinear")
+        setOption(handle, "dither", "no")
+        setOption(handle, "correct-downscaling", "no")
+        setOption(handle, "linear-downscaling", "no")
+        setOption(handle, "sigmoid-upscaling", "no")
+        setOption(handle, "hdr-compute-peak", "no")
+        setOption(handle, "hr-seek", "yes")
+        setOption(handle, "hr-seek-framedrop", "no")
         #if DEBUG
         setOption(handle, "msg-level", "all=v")
         #else
@@ -395,6 +435,21 @@ import UIKit
         name.withCString { namePtr in
             value.withCString { valuePtr in
                 _ = mpv_set_option_string(handle, namePtr, valuePtr)
+            }
+        }
+    }
+
+    /// mpv_set_property_string: the runtime API. mpv_set_option_string
+    /// is pre-init only ("you can't normally set options during
+    /// runtime" — mpv client.h); per-open values must go through here,
+    /// exactly as wzgrx MpvEngine.open does (_setProperty). The old
+    /// per-open setOption calls (http-proxy, headers, user-agent) used
+    /// the pre-init API after initialize, so whether they ever applied
+    /// was unverified — return values are ignored everywhere.
+    private func setPropertyString(_ handle: OpaquePointer, _ name: String, _ value: String) {
+        name.withCString { namePtr in
+            value.withCString { valuePtr in
+                _ = mpv_set_property_string(handle, namePtr, valuePtr)
             }
         }
     }
@@ -441,12 +496,16 @@ import UIKit
     }
 
     private func observeVideoSize(_ handle: OpaquePointer) {
-        // dwidth/dheight drive the render buffer size.
+        // dwidth/dheight drive the render buffer size; hwdec-current
+        // (userdata 3) reports the decoder actually in use.
         "dwidth".withCString { name in
             _ = mpv_observe_property(handle, 1, name, MPV_FORMAT_INT64)
         }
         "dheight".withCString { name in
             _ = mpv_observe_property(handle, 2, name, MPV_FORMAT_INT64)
+        }
+        "hwdec-current".withCString { name in
+            _ = mpv_observe_property(handle, 3, name, MPV_FORMAT_STRING)
         }
     }
 
@@ -643,6 +702,15 @@ import UIKit
     nonisolated private func handlePropertyChange(_ event: mpv_event) {
         guard let data = event.data else { return }
         let property = data.assumingMemoryBound(to: mpv_event_property.self).pointee
+        // hwdec-current (userdata 3) is a string, not an int: the
+        // decoder actually in use. mpv sends it when decoding starts;
+        // "no" means software decode.
+        if event.reply_userdata == 3 {
+            guard property.format == MPV_FORMAT_STRING, let valuePtr = property.data,
+                  let cString = valuePtr.assumingMemoryBound(to: UnsafePointer<CChar>?.self).pointee else { return }
+            hwdecCurrent = String(cString: cString)
+            return
+        }
         guard property.format == MPV_FORMAT_INT64, let valuePtr = property.data else { return }
         let value = valuePtr.assumingMemoryBound(to: Int64.self).pointee
         guard value > 0 else { return }

@@ -114,6 +114,12 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
         guard let reference = Self.parseReference(room.roomID) else { return [] }
         guard let videoID = try? await resolveVideoID(reference) else { return [] }
         let detail = try await fetchDetail(videoID: videoID)
+        if detail.restricted, detail.isLive {
+            // A live but restricted broadcast (members-only / sign-in
+            // / age check): Pure Live reports the restriction instead
+            // of an empty list, so the player shows a real message.
+            throw LiveSiteError.message("该直播受限，无法匿名播放")
+        }
         guard detail.isLive, !detail.restricted else { return [] }
         return try await Self.streams(fromStreamingData: detail.streamingData, videoID: videoID, http: http)
     }
@@ -140,7 +146,10 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
     }
 
     private func watchPage(videoID: String) async throws -> String {
-        let data = try await http.get("\(Self.origin)/watch?v=\(videoID)", headers: Self.pageHeaders(videoID: videoID))
+        // Pure Live's YouTube timeout is 25 s (youtube_site.dart:
+        // _timeout), not HTTPClient's 20 s default — the watch page
+        // is ~1.4 MB and slow links need the extra headroom.
+        let data = try await http.get("\(Self.origin)/watch?v=\(videoID)", headers: Self.pageHeaders(videoID: videoID), timeout: 25)
         guard let html = String(data: data, encoding: .utf8) else {
             throw LiveSiteError.invalidResponse
         }
@@ -172,7 +181,7 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
         headers["Accept"] = "application/json"
         headers["Content-Type"] = "application/json"
         headers["Origin"] = Self.origin
-        return try await http.postJSONParsed("\(Self.origin)/youtubei/v1/player?key=\(apiKey)", jsonData: data, headers: headers)
+        return try await http.postJSONParsed("\(Self.origin)/youtubei/v1/player?key=\(apiKey)", jsonData: data, headers: headers, timeout: 25)
     }
 
     /// Pure builder for the merged page + InnerTube payload.
@@ -198,7 +207,13 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
         let reason = (status["reason"].stringValue ?? "").lowercased()
         let initialMicro = initialPlayer?["microformat"]["playerMicroformatRenderer"] ?? .null
         let apiMicro = api["microformat"]["playerMicroformatRenderer"]
-        let liveDetails = initialMicro["liveBroadcastDetails"].isNull ? apiMicro["liveBroadcastDetails"] : initialMicro["liveBroadcastDetails"]
+        // Pure Live's video() merges page + player with the player
+        // winning — the page microformat is only the fallback.
+        let liveDetails = apiMicro["liveBroadcastDetails"].isNull ? initialMicro["liveBroadcastDetails"] : apiMicro["liveBroadcastDetails"]
+        // Cover: player details first, then the page's, then either
+        // microformat. The avatar is NOT this thumbnail — it is the
+        // channel avatar from the page (see ownerAvatar below).
+        let coverThumbnail = thumbnail(apiDetails["thumbnail"], initialDetails["thumbnail"], apiMicro["thumbnail"], initialMicro["thumbnail"])
         let isLive = apiDetails["isLive"].boolValue == true
             || initialDetails["isLive"].boolValue == true
             || liveDetails["isLiveNow"].boolValue == true
@@ -214,37 +229,45 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
             || reason.contains("sign in")
             || reason.contains("private")
         if restricted {
-            // Login / age / private: never presented as playable.
+            // Login / age / private: never presented as playable —
+            // unless it is live right now. Pure Live's video() keeps
+            // a live broadcast live with its restriction (and reports
+            // the restriction at play time); only a non-live
+            // restricted video is shown as not-live.
+            let liveNow = isLive && statusCode != "LIVE_STREAM_OFFLINE"
             return FetchedDetail(
-                room: room(videoID: videoID, title: title, author: author, thumbnail: thumbnail(apiDetails["thumbnail"], apiMicro["thumbnail"]), category: microCategory(initialMicro, apiMicro), viewers: viewers(in: initialData), isLive: false),
-                isLive: false, restricted: true, streamingData: api["streamingData"])
+                room: room(videoID: videoID, title: title, author: author, thumbnail: coverThumbnail, avatar: ownerAvatar(in: initialData), category: microCategory(apiMicro, initialMicro), viewers: viewers(in: initialData), isLive: liveNow),
+                isLive: liveNow, restricted: true, streamingData: api["streamingData"])
         }
-        if isLive, statusCode == "OK" {
-            // live
+        if isLive, statusCode != "LIVE_STREAM_OFFLINE" {
+            // live (Pure Live: live unless the status says the stream
+            // is offline — a live broadcast is live even when its
+            // status is not OK, e.g. UNPLAYABLE).
         } else if isLiveContent || statusCode == "LIVE_STREAM_OFFLINE" {
             return FetchedDetail(
-                room: room(videoID: videoID, title: title, author: author, thumbnail: thumbnail(apiDetails["thumbnail"], apiMicro["thumbnail"]), category: microCategory(initialMicro, apiMicro), viewers: nil, isLive: false),
+                room: room(videoID: videoID, title: title, author: author, thumbnail: coverThumbnail, avatar: ownerAvatar(in: initialData), category: microCategory(apiMicro, initialMicro), viewers: nil, isLive: false),
                 isLive: false, restricted: false, streamingData: api["streamingData"])
         } else if statusCode.isEmpty {
-            return FetchedDetail(
-                room: room(videoID: videoID, title: title, author: author, thumbnail: thumbnail(apiDetails["thumbnail"], apiMicro["thumbnail"]), category: microCategory(initialMicro, apiMicro), viewers: nil, isLive: false),
-                isLive: false, restricted: false, streamingData: api["streamingData"])
+            // No playability status at all and nothing live: Pure
+            // Live calls this unknown, never "offline" — an ordinary
+            // video is no room.
+            throw LiveSiteError.roomNotFound(videoID)
         } else {
             throw LiveSiteError.roomNotFound(videoID)
         }
         return FetchedDetail(
-            room: room(videoID: videoID, title: title, author: author, thumbnail: thumbnail(apiDetails["thumbnail"], apiMicro["thumbnail"]), category: microCategory(initialMicro, apiMicro), viewers: viewers(in: initialData), isLive: true),
+            room: room(videoID: videoID, title: title, author: author, thumbnail: coverThumbnail, avatar: ownerAvatar(in: initialData), category: microCategory(apiMicro, initialMicro), viewers: viewers(in: initialData), isLive: true),
             isLive: true, restricted: false, streamingData: api["streamingData"])
     }
 
-    private static func room(videoID: String, title: String, author: String, thumbnail: String?, category: String?, viewers: Int?, isLive: Bool) -> LiveRoom {
+    private static func room(videoID: String, title: String, author: String, thumbnail: String?, avatar: String?, category: String?, viewers: Int?, isLive: Bool) -> LiveRoom {
         LiveRoom(
             id: "youtube-\(videoID)",
             platform: .youtube,
             roomID: videoID,
             title: title,
             anchorName: author,
-            anchorAvatarURL: Self.imageURL(thumbnail),
+            anchorAvatarURL: Self.imageURL(avatar),
             coverURL: Self.imageURL(thumbnail),
             categoryName: (category ?? "").isEmpty ? "YouTube Live" : category,
             viewerCount: viewers ?? 0,
@@ -262,11 +285,13 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
         let headers = mediaHeaders(videoID: videoID)
         if let hlsRaw = streaming["hlsManifestUrl"].stringValue, !hlsRaw.isEmpty,
            let masterURL = URL(string: hlsRaw) {
-            if let data = try? await http.get(hlsRaw, headers: headers),
+            if let data = try? await http.get(hlsRaw, headers: headers, timeout: 25),
                let text = String(data: data, encoding: .utf8) {
                 for variant in hlsVariants(masterURL: masterURL, text: text) {
                     guard let url = URL(string: variant.url) else { continue }
-                    let label = variant.height.map { h in "\(h)p\(variant.fps > 30 ? "\(Int(variant.fps))" : "")" } ?? "自动"
+                    // Pure Live's label: height, plus the rounded
+                    // frame rate when above 30.
+                    let label = variant.height.map { h in "\(h)p\(variant.fps > 30 ? "\(Int(variant.fps.rounded()))" : "")" } ?? "HLS 自动"
                     let quality = variant.codec.isEmpty ? "\(label) · HLS" : "\(label) · \(variant.codec.uppercased()) · HLS"
                     collected.append((height: variant.height ?? 0, fps: variant.fps, rank: 30, stream: PlayStream(
                         url: url, quality: quality, line: "HLS", headers: headers,
@@ -275,11 +300,12 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
             }
             if !collected.contains(where: { $0.stream.line == "HLS" }) {
                 collected.append((height: 0, fps: 0, rank: 30, stream: PlayStream(
-                    url: masterURL, quality: "自动 · HLS", line: "HLS", headers: headers,
+                    url: masterURL, quality: "HLS 自动 · HLS", line: "HLS", headers: headers,
                     expiresAt: expiry(of: hlsRaw))))
             }
         }
-        for format in streaming["formats"].arrayValue {
+        // Pure Live's sources(): at most 64 progressive formats.
+        for format in streaming["formats"].arrayValue.prefix(64) {
             guard let urlString = format["url"].stringValue, !urlString.isEmpty,
                   let label = format["qualityLabel"].stringValue, !label.isEmpty,
                   format["itag"].intValue != nil,
@@ -293,12 +319,15 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
         if let dashRaw = streaming["dashManifestUrl"].stringValue, !dashRaw.isEmpty,
            let url = URL(string: dashRaw) {
             collected.append((height: 0, fps: 0, rank: 10, stream: PlayStream(
-                url: url, quality: "自动 · DASH", line: "DASH", headers: headers,
+                url: url, quality: "DASH 自动 · DASH", line: "DASH", headers: headers,
                 expiresAt: expiry(of: dashRaw))))
         }
+        // Pure Live's qualitySort: height × 1000 + rounded fps +
+        // protocol rank (HLS 30, progressive 20, DASH 10), best first.
         collected.sort {
             if $0.height != $1.height { return $0.height > $1.height }
-            if $0.fps != $1.fps { return $0.fps > $1.fps }
+            let leftFPS = Int($0.fps.rounded()), rightFPS = Int($1.fps.rounded())
+            if leftFPS != rightFPS { return leftFPS > rightFPS }
             return $0.rank > $1.rank
         }
         return collected.map { $0.stream }
@@ -316,6 +345,7 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
         let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         guard lines.first == "#EXTM3U" else { return [] }
         var out: [HLSVariant] = []
+        var seen: Set<String> = []
         var pending: [String: String]?
         for line in lines.dropFirst() {
             if line.hasPrefix("#EXT-X-STREAM-INF:") {
@@ -326,15 +356,37 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
             guard let attrs = pending else { continue }
             pending = nil
             var height: Int?
-            if let res = attrs["RESOLUTION"], let x = res.firstIndex(of: "x") {
+            if let res = attrs["RESOLUTION"],
+               res.range(of: #"^[1-9][0-9]{0,4}x[1-9][0-9]{0,4}$"#, options: .regularExpression) != nil,
+               let x = res.firstIndex(of: "x") {
                 height = Int(res[res.index(after: x)...])
             }
             let fps = Double(attrs["FRAME-RATE"] ?? "") ?? 0
             let codec = codecName(attrs["CODECS"] ?? "")
-            let resolved = URL(string: line, relativeTo: masterURL)?.absoluteURL.absoluteString ?? line
-            out.append(HLSVariant(height: height, fps: fps, codec: codec, url: resolved))
+            guard let resolved = URL(string: line, relativeTo: masterURL)?.absoluteURL,
+                  resolved.scheme == "https", Self.isMediaHost(resolved.host ?? "") else {
+                // A variant off YouTube's media hosts: Pure Live
+                // refuses the whole master (FormatException) and the
+                // caller then offers the master itself as the
+                // automatic source — so return no variants here.
+                return []
+            }
+            // Pure Live's quality id (hls:<height>:<fps|0>:<codec>):
+            // two variants of one id are ambiguous, keep the first.
+            let id = "hls:\(height ?? 0):\(fps > 30 ? Int(fps.rounded()) : 0):\(codec.isEmpty ? "auto" : codec)"
+            guard seen.insert(id).inserted else { continue }
+            out.append(HLSVariant(height: height, fps: fps, codec: codec, url: resolved.absoluteString))
         }
         return out
+    }
+
+    /// YouTube media hosts (Pure Live's _mediaHost): googlevideo /
+    /// youtube / youtube-nocookie, bare or subdomain, https only.
+    static func isMediaHost(_ host: String) -> Bool {
+        let value = host.lowercased()
+        return value == "googlevideo.com" || value.hasSuffix(".googlevideo.com")
+            || value == "youtube.com" || value.hasSuffix(".youtube.com")
+            || value == "youtube-nocookie.com" || value.hasSuffix(".youtube-nocookie.com")
     }
 
     /// `KEY=value,KEY="quoted,value"` attribute list. Testable without the network.
@@ -476,7 +528,7 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
         case .video(let id): return id
         case .channel(let path):
             let url = "\(Self.origin)/\(path)/live"
-            let data = try await http.get(url, headers: Self.pageHeaders(videoID: nil))
+            let data = try await http.get(url, headers: Self.pageHeaders(videoID: nil), timeout: 25)
             guard let html = String(data: data, encoding: .utf8) else {
                 throw LiveSiteError.invalidResponse
             }
@@ -618,19 +670,57 @@ final class YoutubeSite: LiveSite, @unchecked Sendable {
 
     /// Last usable thumbnail (largest) from a thumbnail object.
     /// Testable without the network.
-    static func thumbnail(_ values: JSONValue...) -> String? {
+    static func thumbnail(_ values: JSONValue..., avatar: Bool = false) -> String? {
         for value in values {
             let items = value["thumbnails"].arrayValue
             for item in items.reversed() {
                 guard let raw = item["url"].stringValue, !raw.isEmpty,
                       let url = URL(string: raw), url.scheme == "https" else { continue }
                 let host = url.host?.lowercased() ?? ""
-                guard host == "i.ytimg.com" || host.hasSuffix(".ytimg.com")
-                        || host == "yt3.ggpht.com" || host.hasSuffix(".ggpht.com") else { continue }
+                // Pure Live's _imageHost: ytimg / ggpht, bare or
+                // subdomain; channel avatars also come from
+                // googleusercontent.com.
+                guard host == "ytimg.com" || host.hasSuffix(".ytimg.com")
+                        || host == "ggpht.com" || host.hasSuffix(".ggpht.com")
+                        || (avatar && (host == "googleusercontent.com" || host.hasSuffix(".googleusercontent.com"))) else { continue }
                 return raw
             }
         }
         return nil
+    }
+
+    /// Channel avatar of a watch page (`videoOwnerRenderer.thumbnail`,
+    /// Pure Live's _ownerAvatar). The room's avatar used to be the
+    /// video thumbnail itself — a 16:9 still in a round avatar slot.
+    /// Testable without the network.
+    static func ownerAvatar(in json: JSONValue?) -> String? {
+        guard let json else { return nil }
+        var budget = 250_000
+        return walkOwnerAvatar(json, depth: 0, budget: &budget)
+    }
+
+    private static func walkOwnerAvatar(_ value: JSONValue, depth: Int, budget: inout Int) -> String? {
+        guard depth <= 25 else { return nil }
+        budget -= 1
+        guard budget > 0 else { return nil }
+        switch value {
+        case .object(let dict):
+            if let renderer = dict["videoOwnerRenderer"], !renderer.isNull,
+               let url = thumbnail(renderer["thumbnail"], avatar: true) {
+                return url
+            }
+            for child in dict.values {
+                if let found = walkOwnerAvatar(child, depth: depth + 1, budget: &budget) { return found }
+            }
+            return nil
+        case .array(let items):
+            for child in items {
+                if let found = walkOwnerAvatar(child, depth: depth + 1, budget: &budget) { return found }
+            }
+            return nil
+        default:
+            return nil
+        }
     }
 
     private static func microCategory(_ values: JSONValue...) -> String? {

@@ -33,6 +33,12 @@ struct PlayStream: Identifiable, Hashable, Codable, Sendable {
     /// not always end in .flv, and without it AVPlayer would try
     /// them first and the sweep would waste an attempt.
     var formatOverride: String? = nil
+    /// This line's HLS segments are masked upstream and must be
+    /// restored through the loopback relay before mpv sees them
+    /// (Bigo: ref live_media bigoRelayRecipe / BigoHlsProtection).
+    /// The player relays such lines via LoopbackRelay.openHls;
+    /// every other line plays direct.
+    var needsHlsSegmentRestore: Bool = false
 
     /// Container declared by the URL ("flv" / "hls" / ""), so the
     /// engine does not have to probe for it (Pure Live's

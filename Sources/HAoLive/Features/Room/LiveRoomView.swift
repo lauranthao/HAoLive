@@ -47,6 +47,11 @@ struct LiveRoomView: View {
     @State private var loadError: String?
     @State private var danmakuTask: Task<Void, Never>?
 
+    /// The site that opened this room's streams, so the room's
+    /// held playback session (niconico seat / FC2 control) can
+    /// be closed when the room closes.
+    @State private var playbackSite: (any LiveSite)?
+
     /// Room as re-fetched from the platform (title / host / viewers /
     /// live status); the list copy is the fallback when it fails.
     @State private var detailRoom: LiveRoom?
@@ -142,6 +147,11 @@ struct LiveRoomView: View {
             sleepTask?.cancel()
             sleepTask = nil
             playerService.stop()
+            // Close the room's held playback session (niconico
+            // seat / FC2 control): the grant dies with it, so it
+            // must not outlive the room.
+            playbackSite?.endPlaybackSession()
+            playbackSite = nil
             UIScreen.main.brightness = brightnessAtEntry
         }
     }
@@ -177,20 +187,10 @@ struct LiveRoomView: View {
                     .font(.headline)
                     .foregroundStyle(.primary)
             }
-            if let avatarURL = displayRoom.anchorAvatarURL {
-                AsyncImage(url: avatarURL) { image in
-                    image.resizable().scaledToFill()
-                } placeholder: {
-                    Color.secondary.opacity(0.3)
-                }
-                .frame(width: 32, height: 32)
-                .clipShape(Circle())
-            } else {
-                Circle()
-                    .fill(Color.secondary.opacity(0.3))
-                    .frame(width: 32, height: 32)
-                    .overlay(Text(String(displayRoom.anchorName.prefix(1))).font(.caption))
-            }
+            // Avatar through the cover cache (Referer/UA + retries):
+            // AsyncImage sends bare requests, which several image
+            // CDNs refuse.
+            AvatarImage(url: displayRoom.anchorAvatarURL, size: 32, fallbackText: String(displayRoom.anchorName.prefix(1)))
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayRoom.anchorName)
                     .font(.subheadline.bold())
@@ -222,6 +222,12 @@ struct LiveRoomView: View {
                         UIPasteboard.general.string = stream.url.absoluteString
                         ToastCenter.shared.show("已复制播放地址")
                     }
+                }
+                // Full render-path text (the pill in the player chrome
+                // truncates): GL vs SW, the GL failure reason, and the
+                // decoder — the three facts the next "卡" report needs.
+                if playerService.engineName != "—" {
+                    Text("渲染：\(playerService.engineName)")
                 }
                 Button {
                     showingSleepTimer = true
@@ -681,6 +687,7 @@ struct LiveRoomView: View {
             loadError = "该平台暂未接入"
             return
         }
+        playbackSite = site
         // Room detail in parallel with the stream fetch: title /
         // host / viewers / live status as the platform reports
         // them now. The list copy stays if the fetch fails.
@@ -1064,6 +1071,23 @@ struct PlayerChromeView: View {
                         .frame(maxWidth: 420)
                 }
                 Spacer()
+                // On-screen render-path indicator (build 12): the path
+                // used to live only in engineName / logs, which chen
+                // cannot see — so three builds of "还是很卡" could never
+                // say GL or SW. Short tag here (inline and fullscreen
+                // share this chrome); the full text, with the GL
+                // failure reason and decoder, is in the header •••
+                // menu and in engineName.
+                if service.engineName != "—" {
+                    Text(service.engineName)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.white.opacity(0.85))
+                        .lineLimit(1)
+                        .frame(maxWidth: 140)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.black.opacity(0.5), in: Capsule())
+                }
                 if isFullscreen {
                     Button(qualityText) { onOpenQuality() }
                         .font(.subheadline)

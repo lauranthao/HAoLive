@@ -14,8 +14,18 @@
 //           profile_data: is_publish, is_limited, fee,
 //           ticketid, ticket_only, login_only, version.
 //   play    POST /api/getControlServer.php -> control seat,
-//           then a control WebSocket reads the HLS master
-//           (see Fc2ControlSession.swift). One quality "auto".
+//           then a control WebSocket reads the HLS playlists
+//           (see Fc2ControlSession.swift). Tiers 50/40/30/20/10
+//           plus auto, from all three playlist families
+//           (low / high / middle latency). The control socket is
+//           held for the whole playback (ref Fc2LiveControl):
+//           the media server refuses variant playlists once the
+//           socket is gone, and a control_disconnection (grant
+//           expired, code 4500) ends it — the owner takes a new
+//           grant. One quality "auto" alone was the old shape.
+//   search  No server search. Exact channel id / link goes to
+//           memberApi; otherwise the snapshot is filtered
+//           locally (channel id / user / title / category).
 //   search  No server search. Exact channel id / link goes to
 //           memberApi; otherwise the snapshot is filtered
 //           locally (channel id / user / title / category).
@@ -36,6 +46,29 @@ final class Fc2Site: LiveSite, @unchecked Sendable {
     let platform: LivePlatform = .fc2live
     private let http = HTTPClient.shared
 
+    /// The held control seat of the channel being played (ref
+    /// Fc2LiveControl: kept open for the whole playback). The site
+    /// is a SiteRegistry singleton, so one control is held at a
+    /// time; opening another channel's control closes this one,
+    /// and the room view closes it on exit.
+#if !os(Linux)
+    private let controlLock = NSLock()
+    private var heldControl: Fc2Control?
+#endif
+
+    func endPlaybackSession() {
+#if !os(Linux)
+        let control: Fc2Control? = {
+            controlLock.lock()
+            defer { controlLock.unlock() }
+            let control = heldControl
+            heldControl = nil
+            return control
+        }()
+        control?.close()
+#endif
+    }
+
     private static let listURL = "https://live.fc2.com/contents/allchannellist.php"
     private static let pageSize = 20
 
@@ -46,13 +79,14 @@ final class Fc2Site: LiveSite, @unchecked Sendable {
     // MARK: - Categories
 
     func categories() async throws -> [LiveCategory] {
+        // Ref Fc2LiveApi.areaNames (3.x's zh.json).
         [
-            LiveCategory(id: "fc2-0", platform: .fc2live, name: "全部", iconName: nil, iconURL: nil),
-            LiveCategory(id: "fc2-1", platform: .fc2live, name: "Idle Chat", iconName: nil, iconURL: nil),
-            LiveCategory(id: "fc2-2", platform: .fc2live, name: "Game / Work", iconName: nil, iconURL: nil),
-            LiveCategory(id: "fc2-4", platform: .fc2live, name: "Video", iconName: nil, iconURL: nil),
-            LiveCategory(id: "fc2-9", platform: .fc2live, name: "Audio", iconName: nil, iconURL: nil),
-            LiveCategory(id: "fc2-5", platform: .fc2live, name: "Other", iconName: nil, iconURL: nil),
+            LiveCategory(id: "fc2-0", platform: .fc2live, name: "全部公开直播", iconName: nil, iconURL: nil),
+            LiveCategory(id: "fc2-1", platform: .fc2live, name: "闲聊", iconName: nil, iconURL: nil),
+            LiveCategory(id: "fc2-2", platform: .fc2live, name: "游戏 / 作业", iconName: nil, iconURL: nil),
+            LiveCategory(id: "fc2-4", platform: .fc2live, name: "视频", iconName: nil, iconURL: nil),
+            LiveCategory(id: "fc2-9", platform: .fc2live, name: "音频", iconName: nil, iconURL: nil),
+            LiveCategory(id: "fc2-5", platform: .fc2live, name: "其他", iconName: nil, iconURL: nil),
         ]
     }
 
@@ -95,6 +129,9 @@ final class Fc2Site: LiveSite, @unchecked Sendable {
     }
 
     /// Pure mapper for an FC2 room. Testable without the network.
+    /// Ref Fc2LiveApi.room: the owner's picture as the avatar,
+    /// else the cover; live when the state is not offline
+    /// (restricted rooms are live and marked, not offline).
     static func room(fromFc2 room: Fc2Room) -> LiveRoom {
         LiveRoom(
             id: "fc2-\(room.channelID)",
@@ -102,11 +139,11 @@ final class Fc2Site: LiveSite, @unchecked Sendable {
             roomID: room.channelID,
             title: room.title.isEmpty ? room.userName : room.title,
             anchorName: room.userName,
-            anchorAvatarURL: Self.imageURL(room.coverURL),
+            anchorAvatarURL: Self.imageURL(room.avatarURL.isEmpty ? room.coverURL : room.avatarURL),
             coverURL: Self.imageURL(room.coverURL),
             categoryName: room.categoryName,
             viewerCount: room.currentViewers ?? 0,
-            isLive: room.state == .live
+            isLive: room.state != .offline
         )
     }
 
@@ -146,6 +183,7 @@ final class Fc2Site: LiveSite, @unchecked Sendable {
                 || $0.userName.lowercased().contains(needle)
                 || $0.title.lowercased().contains(needle)
                 || $0.categoryName.lowercased().contains(needle)
+                || Fc2ControlSession.legacyAreaName($0.categoryID).lowercased().contains(needle)
         }
         return Self.page(matches, page: page, size: Self.pageSize).map(Self.room(fromFc2:))
     }
@@ -170,18 +208,65 @@ final class Fc2Site: LiveSite, @unchecked Sendable {
         return Self.room(fromFc2: room)
     }
 
-    // MARK: - Play URLs (control session -> HLS master, verbatim)
+    // MARK: - Play URLs (control session -> HLS playlists, held)
+
+#if !os(Linux)
+    /// The control of `channelID`: the held one when it is alive
+    /// (quality switches and lease refreshes read the playlists
+    /// it already announced, no new grant), else a fresh grant +
+    /// control — the old one is closed first (ref: a control
+    /// never reconnects with a used grant).
+    private func heldControl(for channelID: String) async throws -> Fc2Control {
+        let existing: Fc2Control? = {
+            controlLock.lock()
+            defer { controlLock.unlock() }
+            return heldControl
+        }()
+        if let existing, existing.channelID == channelID, existing.isAlive {
+            return existing
+        }
+        existing?.close()
+        let grant = try await Fc2ControlSession.controlGrant(channelID: channelID, http: http)
+        let fresh = try await Fc2Control.open(grant: grant)
+        controlLock.lock()
+        heldControl = fresh
+        controlLock.unlock()
+        return fresh
+    }
+#endif
 
     func playURLs(room: LiveRoom) async throws -> [PlayStream] {
 #if os(Linux)
         throw LiveSiteError.notImplemented
 #else
-        let (master, cookie) = try await Fc2ControlSession.fetchMaster(channelID: room.roomID, http: http)
-        // The shared default headers already carry the FC2
-        // Origin / Referer (platform webBase); the seat cookie
-        // rides along on the stream.
-        let headers = PlaybackHeaders.headers(platform: .fc2live, roomID: room.roomID, cookie: cookie)
-        return [PlayStream(url: master, quality: "auto", line: "主线路", headers: headers)]
+        let control = try await heldControl(for: room.roomID)
+        // Every quality the channel offers (ref Fc2LiveApi.
+        // qualitiesOf): tiers best first, then auto. Each plays
+        // the playlist the control announced for it (ref
+        // Fc2LiveApi.playlistFor) — the old code read only the
+        // mode-0 master and offered a single "auto" line, so
+        // channels whose answer lists tiers never showed them.
+        // Media headers are the reference's (UA / origin /
+        // channel-page referer, no cookie — the control session
+        // authorises server-side). There is no known expiry on
+        // these signed URLs, so no expiresAt: when the control
+        // ends mid-stream the engine fails over and the sweep
+        // re-resolves once with a fresh grant.
+        let ids = Fc2ControlSession.qualitiesOf(control.playlists)
+        guard !ids.isEmpty else { throw LiveSiteError.invalidResponse }
+        var streams: [PlayStream] = []
+        for id in ids {
+            guard let found = Fc2ControlSession.playlistFor(control.playlists, quality: id) else { continue }
+            streams.append(PlayStream(
+                url: found.url,
+                quality: Fc2ControlSession.qualityLabel(for: found.quality),
+                line: "主线路",
+                headers: Fc2ControlSession.mediaHeaders(channelID: room.roomID),
+                formatOverride: "hls"
+            ))
+        }
+        guard !streams.isEmpty else { throw LiveSiteError.invalidResponse }
+        return streams
 #endif
     }
 

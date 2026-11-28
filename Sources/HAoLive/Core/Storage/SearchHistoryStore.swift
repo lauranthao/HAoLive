@@ -4,6 +4,7 @@
 // empty search page; tapping one searches it again.
 
 import Foundation
+import Combine
 
 @MainActor
 final class SearchHistoryStore: ObservableObject {

@@ -28,11 +28,12 @@
 //           locally by nickname / title.
 //   play    No direct URL in the recipe sense: the studio room's
 //           hls_src IS the HLS address (one quality, "live").
-//           Pure Live feeds it to an ffmpeg relay that un-masks
-//           protected segments (BigoHlsProtection); HAoLive's
-//           mpv has no such step yet — see BigoRecipe.swift.
-//           playURLs returns the hls_src verbatim with Bigo's
-//           web headers, and [] when the room has none.
+//           Ref bigo_site.resolveInput: a fresh token + studio
+//           answer on EVERY open, never the playlist carried from
+//           the detail. The line is relayed by the player
+//           (LoopbackRelay.openHls + BigoHlsProtection) so
+//           protected segments are un-masked before mpv sees them;
+//           playURLs marks it needsHlsSegmentRestore.
 //   danmaku BigoDanmaku.swift (chat WS, guest account from
 //           getWebSocketLink). NOT verified live from this VM —
 //           the WS handshake needs a live room's guest account;
@@ -57,7 +58,7 @@ final class BigoSite: LiveSite, @unchecked Sendable {
     // MARK: - Categories (one public category)
 
     func categories() async throws -> [LiveCategory] {
-        [LiveCategory(id: "bigo-72", platform: .bigo, name: "公开", iconName: nil, iconURL: nil)]
+        [LiveCategory(id: "bigo-72", platform: .bigo, name: "公开推荐", iconName: nil, iconURL: nil)]
     }
 
     // MARK: - Lists
@@ -88,7 +89,11 @@ final class BigoSite: LiveSite, @unchecked Sendable {
             return cached
         }
         let json = try await http.getJSON(Self.directoryURL, headers: BigoRecipe.headers)
-        let cards = Self.cards(fromDirectory: json)
+        // Locked (password) rooms are dropped here — they are never
+        // listed as playable rooms. (The old code said this in the
+        // comment but never did it: locked cards reached the grid
+        // marked live and failed only on tap.)
+        let cards = Self.cards(fromDirectory: json).filter { !$0.isLocked }
         cachedDirectory = cards
         cachedDirectoryAt = Date()
         return cards
@@ -99,11 +104,15 @@ final class BigoSite: LiveSite, @unchecked Sendable {
     static func cards(fromDirectory json: JSONValue) -> [BigoDirectoryCard] {
         guard json["code"].intValue == 0,
               json["data"]["resCode"].stringValue == "0" else { return [] }
-        var seen = Set<String>()
+        // Ref bigo_api.directory: a row repeating a Bigo id OR an
+        // owner is left out on its own.
+        var seenIDs = Set<String>()
+        var seenOwners = Set<Int>()
         var cards: [BigoDirectoryCard] = []
         for row in json["data"]["data"].arrayValue {
             guard let card = card(fromDirectoryRow: row),
-                  seen.insert(card.siteID).inserted else { continue }
+                  seenIDs.insert(card.siteID).inserted,
+                  seenOwners.insert(card.ownerID).inserted else { continue }
             cards.append(card)
         }
         return cards
@@ -179,7 +188,20 @@ final class BigoSite: LiveSite, @unchecked Sendable {
             !$0.isLocked
                 && ($0.nickname.lowercased().contains(needle) || $0.title.lowercased().contains(needle))
         }
-        return Self.page(matches, page: page, size: Self.pageSize).map(Self.room(fromCard:))
+        if !matches.isEmpty {
+            return Self.page(matches, page: page, size: Self.pageSize).map(Self.room(fromCard:))
+        }
+        // Ref bigo_site.searchRoomsCancellable: a word of letters
+        // that matches no card is still looked up as an id — a
+        // letters-only site id never reaches the exact lookup above
+        // (it has no digit, "_", "." or "-"), so without this it
+        // could never be found by search.
+        if page == 1,
+           let siteID = BigoRecipe.parseLinkOrSiteID(query),
+           let room = try? await exactRoom(siteID: siteID) {
+            return [room]
+        }
+        return []
     }
 
     func searchAnchors(keyword: String) async throws -> [LiveRoom] {
@@ -208,7 +230,7 @@ final class BigoSite: LiveSite, @unchecked Sendable {
     /// hls_src. Testable without the network.
     static func room(fromStudio studio: BigoStudioRoom) -> LiveRoom {
         let isLive = studio.access == .public && studio.isAlive == true && studio.hlsURL != nil
-        var room = LiveRoom(
+        let room = LiveRoom(
             id: "bigo-\(studio.canonicalSiteID)",
             platform: .bigo,
             roomID: studio.canonicalSiteID,
@@ -220,28 +242,25 @@ final class BigoSite: LiveSite, @unchecked Sendable {
             viewerCount: 0,
             isLive: isLive
         )
-        // Carry the media lease on the room so playURLs need not
-        // re-run the token flow (Pure Live's LiveRoom.data).
-        if let hls = studio.hlsURL {
-            room.playDataJSON = "{\"hls\":\"\(hls.absoluteString)\",\"siteId\":\"\(studio.canonicalSiteID)\"}"
-        }
+        // Ref bigo_api: the studio answer carries NO media address
+        // (BigoRoomData holds only hasStream) — playback re-asks
+        // the studio with a fresh token on every open, so the
+        // playlist is deliberately not carried on the room.
         return room
     }
 
     // MARK: - Play URLs (the studio hls_src, verbatim)
 
     func playURLs(room: LiveRoom) async throws -> [PlayStream] {
-        if let carried = room.playDataJSON,
-           let data = carried.data(using: .utf8),
-           let json = JSONValue.parse(data),
-           let hlsText = json["hls"].stringValue,
-           let url = URL(string: hlsText) {
-            return [PlayStream(url: url, quality: "live", line: "主线路", headers: BigoRecipe.headers)]
-        }
+        // Ref bigo_site.resolveInput: a fresh web token + studio
+        // answer on EVERY open — the playlist carried from the
+        // detail is never reused. The line is relayed by the player
+        // (LoopbackRelay.openHls) so protected segments are
+        // un-masked before mpv sees them.
         let studio = try await BigoRecipe.studioRoom(siteID: room.roomID, http: http)
         guard studio.access == .public, studio.isAlive == true,
               let url = studio.hlsURL else { return [] }
-        return [PlayStream(url: url, quality: "live", line: "主线路", headers: BigoRecipe.headers)]
+        return [PlayStream(url: url, quality: "live", line: "主线路", headers: BigoRecipe.headers, needsHlsSegmentRestore: true)]
     }
 
     // MARK: - Danmaku
@@ -252,9 +271,13 @@ final class BigoSite: LiveSite, @unchecked Sendable {
             let task = Task {
                 // The chat channel needs the numeric room id + owner
                 // id from the studio room; fetch them here (the
-                // token flow runs once for this).
+                // token flow runs once for this). Ref
+                // bigo_api.danmakuArgs: no chat when the room is not
+                // live, behind the login gate, a password room, or
+                // roomType "1" (the page ends the live).
                 guard let studio = try? await BigoRecipe.studioRoom(siteID: roomID, http: self.http),
-                      studio.access == .public,
+                      studio.access == .public, studio.isAlive == true,
+                      studio.roomType != "1",
                       let numericRoomID = studio.roomID, !numericRoomID.isEmpty else {
                     continuation.finish()
                     return

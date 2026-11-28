@@ -257,7 +257,17 @@ final class AcfunSite: LiveSite, @unchecked Sendable {
         if let countRange = card.range(of: "info__danmaku-count\">") {
             let tail = String(card[countRange.upperBound...])
             let digits = tail.prefix(while: { $0.isNumber || $0 == "." || $0 == "," })
-            followers = Int(digits.replacingOccurrences(of: ",", with: "")) ?? 0
+            // wzgrx _followers: "1.2万粉丝" / "1.2亿粉丝" — a Double
+            // prefix times 10,000 for 万, 100,000,000 for 亿.
+            let number = Double(digits.replacingOccurrences(of: ",", with: "")) ?? 0
+            let rest = String(tail.dropFirst(digits.count))
+            if rest.hasPrefix("万") {
+                followers = Int(number * 10_000)
+            } else if rest.hasPrefix("亿") {
+                followers = Int(number * 100_000_000)
+            } else {
+                followers = Int(number)
+            }
         }
         return LiveRoom(
             id: "acfun-\(authorID)",
@@ -306,8 +316,6 @@ final class AcfunSite: LiveSite, @unchecked Sendable {
               user["id"].stringValue == authorID,
               let name = user["name"].stringValue, !name.isEmpty else { return nil }
         let liveID = data["liveId"].stringValue ?? ""
-        let streamName = data["streamName"].stringValue ?? ""
-        guard liveID.isEmpty == streamName.isEmpty else { return nil }
         let isPaid = !(data["paidShowUuid"].stringValue ?? "").isEmpty
         return LiveRoom(
             id: "acfun-\(authorID)",
@@ -373,6 +381,9 @@ final class AcfunSite: LiveSite, @unchecked Sendable {
         )
         guard json["result"].intValue == 0,
               let userID = json["userId"].stringValue, !userID.isEmpty,
+              // wzgrx visitor(): the userId must match the author-id
+              // pattern (positive decimal, at most 20 digits).
+              userID.range(of: #"^[1-9][0-9]{0,19}$"#, options: .regularExpression) != nil,
               let token = json["acfun.api.visitor_st"].stringValue, !token.isEmpty else {
             throw LiveSiteError.invalidResponse
         }
@@ -391,8 +402,12 @@ final class AcfunSite: LiveSite, @unchecked Sendable {
         do {
             return try await startPlay(authorID: room.roomID)
         } catch {
-            // The visitor token may have expired mid-flight: drop the
-            // cached session once and retry.
+            // wzgrx _startPlay: only a RiskControl failure (here:
+            // invalidResponse) is retried once with a new session.
+            // A closed or paid room throws .message and is not
+            // retried — retrying it would burn another login +
+            // startPlay for nothing.
+            guard case LiveSiteError.invalidResponse = error else { throw error }
             Self.visitorSession = nil
             return try await startPlay(authorID: room.roomID)
         }
@@ -416,6 +431,12 @@ final class AcfunSite: LiveSite, @unchecked Sendable {
             headers: Self.playHeaders
         )
         guard json["result"].intValue == 1 else {
+            // wzgrx startPlay(): 129004 is a closed room, 380205 a
+            // paid show — both are final, not retried; anything else
+            // is RiskControl, retried once with a new session.
+            let code = json["result"].intValue ?? -1
+            if code == 129004 { throw LiveSiteError.message("直播已关播") }
+            if code == 380205 { throw LiveSiteError.message("付费演出，需购票后观看") }
             Self.visitorSession = nil
             throw LiveSiteError.invalidResponse
         }
@@ -468,17 +489,30 @@ final class AcfunSite: LiveSite, @unchecked Sendable {
             }
         }
         qualities.sort { $0.rank > $1.rank }
+        // wzgrx mediaHeaders: UA + Referer + Origin
+        // https://live.acfun.cn.
         let headers: [String: String] = [
             "user-agent": PlaybackHeaders.desktopUA,
+            "origin": origin,
             "referer": "\(origin)/",
         ]
         var streams: [PlayStream] = []
         for quality in qualities {
             for entry in quality.urls {
                 guard let url = URL(string: entry.url) else { continue }
-                streams.append(PlayStream(url: url, quality: quality.label, line: entry.line, headers: headers))
+                streams.append(PlayStream(url: url, quality: quality.label, line: entry.line, headers: headers, expiresAt: Self.expiry(of: url)))
             }
         }
         return streams
+    }
+
+    /// wzgrx lease(): the first field of the URL's `auth_key` query
+    /// is the expiry Unix seconds (about 30 days after issue).
+    static func expiry(of url: URL) -> Date? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let authKey = components.queryItems?.first(where: { $0.name == "auth_key" })?.value,
+              let first = authKey.split(separator: "-").first,
+              let seconds = Double(String(first)) else { return nil }
+        return Date(timeIntervalSince1970: seconds)
     }
 }

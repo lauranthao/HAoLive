@@ -28,11 +28,14 @@
 //           {roomId, status: 1, lines: [{streamProfiles: [{rate,
 //           codec, layout, httpsFlv[], httpsHls[]}]}]}}; each URL is
 //           validated (host liveplay.live.kugou.com, /live/ path,
-//           txSecret + txTime present, token starts "0-{roomId}-")
-//           and kept verbatim — signed query params are never
-//           rebuilt. Verified: 200, 2 lines, FLV profiles (rate 5).
-//           Quality label is "{HLS|FLV} {rate}" (the platform's own
-//           rate tier); expiresAt comes from the txTime hex seconds.
+//           txSecret + txTime present) and kept verbatim — signed
+//           query params are never rebuilt. wzgrx mediaUrl does not
+//           read the token at all, so neither do we: a new signature
+//           format must not lose every URL. Verified: 200, 2 lines,
+//           FLV profiles (rate 5). Quality label is
+//           "{FLV|HLS} 码率档 {rate}" (wzgrx); H.264 variants first,
+//           then rate desc (wzgrx qualities(preferH264: true)).
+//           expiresAt comes from the txTime hex seconds.
 // Danmaku: NOT implemented — the reference chat channel is a binary
 // protobuf protocol whose dispatch request is signed with a fixed
 // salt, and the frame codec needs a Snappy decoder; copying the
@@ -54,7 +57,9 @@ final class KugouSite: LiveSite, @unchecked Sendable {
     private static let pageSize = 30
 
     private static var headers: [String: String] {
-        ["Origin": webBase, "Referer": "\(webBase)/"]
+        // wzgrx apiHeaders: the Chrome 140 UA, not HTTPClient's
+        // Chrome 126 default.
+        ["User-Agent": PlaybackHeaders.desktopUA, "Origin": webBase, "Referer": "\(webBase)/"]
     }
 
     /// Built-in categories when the homepage scrape finds none.
@@ -147,9 +152,10 @@ final class KugouSite: LiveSite, @unchecked Sendable {
     private func search(keyword: String, page: Int = 1) async throws -> [LiveRoom] {
         let query = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, query.count <= 100, page >= 1, page <= 100 else { return [] }
-        // A bare room id goes straight to detail.
-        if Self.validRoomID(query) != nil, page == 1 {
-            if let detail = try? await roomDetail(roomID: query) {
+        // A bare room id or a fanxing/mfanxing room link goes
+        // straight to detail (wzgrx parseRoomId).
+        if let id = Self.parseRoomID(query), page == 1 {
+            if let detail = try? await roomDetail(roomID: id) {
                 return [detail]
             }
             return []
@@ -179,7 +185,7 @@ final class KugouSite: LiveSite, @unchecked Sendable {
     // MARK: - Room detail
 
     func roomDetail(roomID: String) async throws -> LiveRoom {
-        guard let id = Self.validRoomID(roomID) else {
+        guard let id = Self.parseRoomID(roomID) else {
             throw LiveSiteError.roomNotFound(roomID)
         }
         let json = try await http.getJSON(Self.urlWithQuery("\(Self.detailBase)/roomcen/room/web/cdn/getEnterRoomInfo", [("roomId", id)]), headers: Self.headers)
@@ -199,9 +205,13 @@ final class KugouSite: LiveSite, @unchecked Sendable {
             ("supportEncryptMode", "1"), ("appid", "1010"), ("_", "\(millis)"),
         ])
         let json = try await http.getJSON(url, headers: Self.headers)
+        // wzgrx variants(): code == -1 is loginRequiredCode — the
+        // room needs a login, which HAoLive does not do, so it is
+        // unplayable (return no streams, not an error).
+        if json["code"].intValue == -1 { return [] }
         let data = try Self.responseData(json)
         guard data["roomId"].stringValue == id, data["status"].intValue == 1 else { return [] }
-        var variants: [(id: String, protocol: String, rate: Int, urls: [URL])] = []
+        var variants: [(id: String, protocol: String, rate: Int, codec: Int, urls: [URL])] = []
         var indexByID: [String: Int] = [:]
         for line in data["lines"].arrayValue {
             for profile in line["streamProfiles"].arrayValue {
@@ -217,20 +227,28 @@ final class KugouSite: LiveSite, @unchecked Sendable {
                             if !variants[index].urls.contains(uri) { variants[index].urls.append(uri) }
                         } else {
                             indexByID[variantID] = variants.count
-                            variants.append((id: variantID, protocol: proto, rate: rate, urls: [uri]))
+                            variants.append((id: variantID, protocol: proto, rate: rate, codec: codec, urls: [uri]))
                         }
                     }
                 }
             }
         }
-        variants.sort { $0.rate > $1.rate }
+        // wzgrx qualities(preferH264: true): H.264 variants first
+        // (codec 2 is HEVC — heavy software decode), then rate desc,
+        // then FLV before HLS.
+        variants.sort {
+            let aHEVC = $0.codec == 2, bHEVC = $1.codec == 2
+            if aHEVC != bHEVC { return !aHEVC }
+            if $0.rate != $1.rate { return $0.rate > $1.rate }
+            return $0.protocol == "flv" && $1.protocol != "flv"
+        }
         let headers = PlaybackHeaders.headers(platform: .kugoulive, roomID: id)
         var streams: [PlayStream] = []
         for variant in variants {
             for (lineIndex, url) in variant.urls.enumerated() {
                 streams.append(PlayStream(
                     url: url,
-                    quality: "\(variant.protocol.uppercased()) \(variant.rate)",
+                    quality: "\(variant.protocol.uppercased()) 码率档 \(variant.rate)",
                     line: "线路\(lineIndex + 1)",
                     headers: headers,
                     expiresAt: Self.expiry(of: url)
@@ -249,6 +267,27 @@ final class KugouSite: LiveSite, @unchecked Sendable {
               value.first.map({ $0 != "0" }) == true,
               value.allSatisfy({ $0.isNumber }) else { return nil }
         return value
+    }
+
+    /// wzgrx KugouLiveSite.parseRoomId: a bare room id, or a
+    /// fanxing/mfanxing room link — a single-number path, or
+    /// ?roomId=. No user info, no fragment, port 80/443/none.
+    static func parseRoomID(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let id = validRoomID(value) { return id }
+        guard let url = URL(string: value),
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = url.host?.lowercased(),
+              host == "fanxing.kugou.com" || host == "mfanxing.kugou.com"
+                || host.hasSuffix(".fanxing.kugou.com") || host.hasSuffix(".mfanxing.kugou.com"),
+              url.user == nil, url.fragment == nil,
+              url.port == nil || url.port == 80 || url.port == 443 else { return nil }
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let idParam = components.queryItems?.first(where: { $0.name == "roomId" })?.value,
+           let id = validRoomID(idParam) { return id }
+        let segments = url.pathComponents.filter { $0 != "/" }
+        if segments.count == 1, let id = validRoomID(segments[0]) { return id }
+        return nil
     }
 
     static func categoryID(of category: LiveCategory) -> String {
@@ -319,14 +358,17 @@ final class KugouSite: LiveSite, @unchecked Sendable {
             item["label"].stringValue, item["topicContent"].stringValue,
             item["performContent"].stringValue, nick.isEmpty ? nil : nick
         ) ?? "酷狗直播"
+        // wzgrx image(): avatar falls back to the cover when empty.
+        let cover = Self.image(HaoText.firstNonEmpty(item["imgPath"].stringValue, item["imagePath"].stringValue))
+        let avatar = Self.image(HaoText.firstNonEmpty(item["userLogo"].stringValue, item["logo"].stringValue)) ?? cover
         return LiveRoom(
             id: "kugoulive-\(roomID)",
             platform: .kugoulive,
             roomID: roomID,
             title: title,
             anchorName: nick.isEmpty ? "酷狗直播" : nick,
-            anchorAvatarURL: Self.imageURL(HaoText.firstNonEmpty(item["userLogo"].stringValue, item["logo"].stringValue)),
-            coverURL: Self.imageURL(HaoText.firstNonEmpty(item["imgPath"].stringValue, item["imagePath"].stringValue)),
+            anchorAvatarURL: avatar,
+            coverURL: cover,
             categoryName: item["category"][0]["name"].stringValue,
             viewerCount: item["viewerNum"].intValue ?? item["getViewerNum"].intValue ?? 0,
             isLive: isLive
@@ -336,8 +378,12 @@ final class KugouSite: LiveSite, @unchecked Sendable {
     /// Pure parser for the getEnterRoomInfo payload.
     static func room(fromDetailData data: JSONValue, roomID: String) throws -> LiveRoom {
         let normal = data["normalRoomInfo"]
+        // wzgrx roomInfo(): nick empty AND (kugouId empty or "0")
+        // means NotFound.
+        let detailNick = normal["nickName"].stringValue ?? ""
+        let detailKugouID = normal["kugouId"].stringValue ?? ""
         guard !normal.isNull,
-              !(normal["nickName"].stringValue ?? "").isEmpty || !(normal["kugouId"].stringValue ?? "").isEmpty else {
+              !detailNick.isEmpty || !(detailKugouID.isEmpty || detailKugouID == "0") else {
             throw LiveSiteError.roomNotFound(roomID)
         }
         let liveType = data["liveType"].intValue
@@ -351,14 +397,16 @@ final class KugouSite: LiveSite, @unchecked Sendable {
             isLive = false
         }
         let nick = normal["nickName"].stringValue ?? ""
+        let detailCover = Self.image(normal["imgPath"].stringValue)
+        let detailAvatar = Self.image(normal["userLogo"].stringValue) ?? detailCover
         return LiveRoom(
             id: "kugoulive-\(roomID)",
             platform: .kugoulive,
             roomID: roomID,
             title: nick.isEmpty ? "酷狗直播" : nick,
             anchorName: nick.isEmpty ? "酷狗直播" : nick,
-            anchorAvatarURL: Self.imageURL(normal["userLogo"].stringValue),
-            coverURL: Self.imageURL(normal["imgPath"].stringValue),
+            anchorAvatarURL: detailAvatar,
+            coverURL: detailCover,
             categoryName: nil,
             viewerCount: 0,
             isLive: isLive
@@ -367,8 +415,11 @@ final class KugouSite: LiveSite, @unchecked Sendable {
 
     /// Validate one signed media URL (kept verbatim when valid):
     /// https, liveplay.live.kugou.com host, /live/ path, matching
-    /// extension, txSecret + txTime present, token bound to the room.
+    /// extension, txSecret + txTime present. The token is NOT read
+    /// (wzgrx mediaUrl, 29-7): a new signature format must not lose
+    /// every URL. `roomID` is kept for the call-site shape only.
     static func validMediaURL(_ raw: String, roomID: String, protocol proto: String) -> URL? {
+        _ = roomID
         guard let url = URL(string: raw), url.scheme == "https",
               url.user == nil, url.password == nil, url.fragment == nil,
               let host = url.host?.lowercased(),
@@ -383,8 +434,25 @@ final class KugouSite: LiveSite, @unchecked Sendable {
             }
         }
         guard let secret = query["txSecret"], !secret.isEmpty,
-              let txTime = query["txTime"], Self.isHex(txTime, minLength: 8, maxLength: 16),
-              let token = query["token"], token.hasPrefix("0-\(roomID)-") else { return nil }
+              let txTime = query["txTime"], Self.isHex(txTime, minLength: 8, maxLength: 16) else { return nil }
+        return url
+    }
+
+    /// wzgrx KugouLiveApi.image(): fold a doubled /v2/fxuserlogo/
+    /// prefix, // -> https, root-relative -> p3.fx.kgimg.com,
+    /// http -> https; only kgimg.com / kugou.com hosts are kept.
+    static func image(_ raw: String?) -> URL? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        value = value.replacingOccurrences(of: "/v2/fxuserlogo//v2/fxuserlogo/", with: "/v2/fxuserlogo/")
+        if value.hasPrefix("//") {
+            value = "https:" + value
+        } else if value.hasPrefix("/") {
+            value = "https://p3.fx.kgimg.com" + value
+        } else if value.hasPrefix("http://") {
+            value = "https://" + value.dropFirst("http://".count)
+        }
+        guard let url = URL(string: value), let host = url.host?.lowercased(),
+              host.hasSuffix("kgimg.com") || host.hasSuffix("kugou.com") else { return nil }
         return url
     }
 

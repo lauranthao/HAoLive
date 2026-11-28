@@ -20,14 +20,21 @@
 // 3 video variants (1280x720 @3Mbps, 854x480 @1.5Mbps,
 // 512x288 @480Kbps).
 //
-// Lifetime caveat (honest): the seat is a live session — Pure Live
-// holds it open for the whole playback and sends keepSeat every
-// keepIntervalSec. HAoLive's playURLs is one-shot: this helper
-// opens the session, reads the master, and closes it. The variant
-// URLs + cookies keep working while the grant is valid, but
-// playback may stop when the seat/cookies expire and the player
-// cannot renew them. A player-layer session (keep the seat alive
-// for the whole playback) is the follow-up; it is NOT faked here.
+// Lifetime (ref NiconicoSeat, niconico_seat.dart): the seat is a
+// live session — the owner holds it open for the whole playback
+// and sends keepSeat every keepIntervalSec (and on ping, with
+// pong); a later `stream` message replaces the grant and revokes
+// the old one; error / disconnect / 90 s of silence ends it.
+// NiconicoSession below is that seat, in Swift: NiconicoSite
+// opens one per program, reuses it while it is alive (quality
+// switches and lease refreshes re-read the master through it),
+// and closes it when the room closes (LiveSite.endPlaybackSession).
+// The grant's cookies are path-scoped (ref NiconicoGrant.
+// cookieHeaderFor): every request carries only the cookies of
+// its own path — all of them in one header is refused with 403 —
+// and already-expired cookies are dropped. The earliest cookie
+// expiry becomes PlayStream.expiresAt, so the player refreshes
+// before the grant dies.
 //
 // No login: access == loginRequired (needLogin) or regionRestricted
 // (country restriction) rooms are reported as such and never
@@ -69,7 +76,7 @@ struct NiconicoWatch {
     }
 
     static func isBroadcasterRoomID(_ value: String) -> Bool {
-        value.range(of: #"^(?:user/[1-9][0-9]{0,17}|ch[1-9][0-9]{0,17})$"#, options: .regularExpression) != nil
+        value.range(of: #"^(?:user/[1-9][0-9]{0,18}|ch[1-9][0-9]{0,18})$"#, options: .regularExpression) != nil
     }
 
     /// Parse a program id out of a bare id, a watch URL, or a
@@ -146,6 +153,18 @@ struct NiconicoWatch {
         }
         let count = program["statistics"]["watchCount"].intValue
         let supplier = program["supplier"]
+        // Ref NiconicoApi.watchData: a channel's supplier has no
+        // icons — a channel's room shows the channel's icon
+        // (socialGroup.thumbnailImageUrl), as its list card does.
+        // The old code read only the supplier icons, so channel
+        // rooms showed a blank avatar on the detail page.
+        let social = data["socialGroup"]
+        let channelAvatar: String?
+        if social["type"].stringValue == "channel" {
+            channelAvatar = Self.publicImage(social["thumbnailImageUrl"].stringValue)
+        } else {
+            channelAvatar = nil
+        }
         return NiconicoWatch(
             programID: programID,
             title: program["title"].stringValue ?? "",
@@ -156,7 +175,7 @@ struct NiconicoWatch {
             webSocketURL: socket,
             frontendID: frontendID,
             coverURL: Self.coverURL(program),
-            avatarURL: Self.publicImage(supplier["icons"]["uri150x150"].stringValue)
+            avatarURL: Self.publicImage(supplier["icons"]["uri150x150"].stringValue) ?? channelAvatar
         )
     }
 
@@ -172,10 +191,14 @@ struct NiconicoWatch {
             ?? publicImage(program["thumbnail"]["small"].stringValue)
     }
 
-    /// Only https artwork on niconico's own image hosts.
+    /// Only https artwork on niconico's own image hosts
+    /// (ref NiconicoApi.publicImage: no port, credentials or
+    /// fragment either — a link with any of those is dropped,
+    /// not the room).
     static func publicImage(_ value: String?) -> String? {
         guard let value, value.count <= 8192,
               let uri = URL(string: value), uri.scheme == "https",
+              uri.user == nil, uri.password == nil, uri.port == nil, uri.fragment == nil,
               let host = uri.host,
               host.hasSuffix(".nimg.jp") || host.hasSuffix(".nicovideo.jp") else { return nil }
         return value
@@ -239,6 +262,58 @@ struct NiconicoVariant {
     }
 }
 
+/// One media cookie of a stream grant (ref NiconicoApi.
+/// NiconicoCookie): name/value/path, plus the expiry when the
+/// server sent one.
+struct NiconicoCookie {
+    let name: String
+    let value: String
+    let path: String
+    let expires: Date?
+}
+
+/// One revocable stream grant: the seat's `stream` message
+/// (ref NiconicoApi.NiconicoGrant). The HLS master and every
+/// playlist, segment and key below it need the cookies of their
+/// own path on the media origin. A later `stream` message or
+/// the seat's end revokes the grant; its cookies are dropped
+/// with it.
+struct NiconicoGrant {
+    let masterURL: URL
+    let cookies: [NiconicoCookie]
+
+    /// The `Cookie` header for `target` at `now` (ref NiconicoGrant.
+    /// cookieHeaderFor): the unexpired cookies whose path is
+    /// `target`'s path or a parent of it, on exactly the master's
+    /// origin, longest path first, then in the order received;
+    /// nil when none applies.
+    func cookieHeader(for target: URL, at now: Date = Date()) -> String? {
+        guard target.scheme == "https", target.host == masterURL.host else { return nil }
+        let matching = cookies.enumerated().filter { pair in
+            let cookie = pair.element
+            return (cookie.expires == nil || cookie.expires! > now)
+                && Self.pathMatches(request: target.path, cookie: cookie.path)
+        }.sorted { a, b in
+            if a.element.path.count != b.element.path.count {
+                return a.element.path.count > b.element.path.count
+            }
+            return a.offset < b.offset
+        }
+        guard !matching.isEmpty else { return nil }
+        return matching.map { "\($0.element.name)=\($0.element.value)" }.joined(separator: "; ")
+    }
+
+    /// The earliest expiry among the grant's cookies, if any —
+    /// the PlayStream.expiresAt the player refreshes before.
+    var earliestExpiry: Date? { cookies.compactMap(\.expires).min() }
+
+    static func pathMatches(request: String, cookie: String) -> Bool {
+        request == cookie
+            || (request.hasPrefix(cookie)
+                && (cookie.hasSuffix("/") || request.dropFirst(cookie.count).hasPrefix("/")))
+    }
+}
+
 enum NiconicoMaster {
     static let origin = "https://live.nicovideo.jp"
 
@@ -284,7 +359,9 @@ enum NiconicoMaster {
 
     /// Parse a master playlist into variants (RESOLUTION +
     /// BANDWIDTH required, duplicates rejected). Pure function,
-    /// testable without the network.
+    /// testable without the network. Order is the reference's
+    /// (ref NiconicoApi.qualities): height, then width, then
+    /// bandwidth, highest first.
     static func parseVariants(_ text: String, baseURL: URL) -> [NiconicoVariant] {
         var variants: [NiconicoVariant] = []
         var seen = Set<String>()
@@ -309,138 +386,23 @@ enum NiconicoMaster {
             let ha = Int($0.resolution.split(separator: "x").last ?? "0") ?? 0
             let hb = Int($1.resolution.split(separator: "x").last ?? "0") ?? 0
             if ha != hb { return ha > hb }
+            let wa = Int($0.resolution.split(separator: "x").first ?? "0") ?? 0
+            let wb = Int($1.resolution.split(separator: "x").first ?? "0") ?? 0
+            if wa != wb { return wa > wb }
             return $0.bandwidth > $1.bandwidth
         }
         return variants
     }
 
-    /// Validate one stream-grant cookie row (name/value/path/
-    /// domain/secure, as issued by the session). Returns the
-    /// "name=value" pair, or nil when the row is unusable.
-    static func cookiePair(_ entry: JSONValue) -> String? {
-        guard let name = entry["name"].stringValue,
-              name.range(of: #"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"#, options: .regularExpression) != nil,
-              !name.hasPrefix("__Host-"),
-              let value = entry["value"].stringValue,
-              !value.contains(";"), !value.contains("\""), !value.contains("\\"),
-              let path = entry["path"].stringValue,
-              path.range(of: #"^/hls/[A-Za-z0-9_/-]+$"#, options: .regularExpression) != nil,
-              let domain = entry["domain"].stringValue,
-              domain == "nicovideo.jp" || domain == ".nicovideo.jp",
-              entry["secure"].boolValue == true else { return nil }
-        return "\(name)=\(value)"
-    }
-
-#if !os(Linux)
-    /// Open a watch session for an allowed, on-air program, read
-    /// its master playlist, and close the session again (see the
-    /// lifetime caveat in the file header). Returns the variants
-    /// plus the Cookie header the player must send with them.
-    static func fetchVariants(watch: NiconicoWatch, http: HTTPClient) async throws -> (variants: [NiconicoVariant], cookieHeader: String) {
-        guard watch.status == .onAir else { return ([], "") }
-        guard watch.access == .allowed else {
-            switch watch.access {
-            case .loginRequired: throw LiveSiteError.message("该节目需要登录后才能观看")
-            case .regionRestricted: throw LiveSiteError.message("该节目在当前地区无法观看")
-            default: throw LiveSiteError.message("该节目暂时无法观看")
-            }
-        }
-        guard let socketURL = watch.webSocketURL,
-              let frontendID = watch.frontendID else { throw LiveSiteError.invalidResponse }
-        var components = URLComponents(url: socketURL, resolvingAgainstBaseURL: false)
-        var items = components?.queryItems ?? []
-        items.append(URLQueryItem(name: "frontend_id", value: String(frontendID)))
-        components?.queryItems = items
-        guard let url = components?.url else { throw LiveSiteError.invalidResponse }
-        let grant = try await openSession(url: url)
-        let cookieHeader = grant.cookies.joined(separator: "; ")
-        let data = try await http.get(
-            grant.masterURL.absoluteString,
-            headers: [
-                "User-Agent": "Mozilla/5.0",
-                "Origin": origin,
-                "Referer": "\(origin)/watch/\(watch.programID)",
-                "Cookie": cookieHeader,
-            ]
-        )
-        guard let text = String(data: data, encoding: .utf8) else { throw LiveSiteError.invalidResponse }
-        return (parseVariants(text, baseURL: grant.masterURL), cookieHeader)
-    }
-
-    /// One watch-session grant: the master URI plus its cookies.
-    struct Grant {
-        let masterURL: URL
-        let cookies: [String]
-    }
-
-    /// Open the relive WebSocket, send startWatching + getAkashic,
-    /// and wait for the seat + stream messages (25s deadline).
-    /// Answers ping with pong. Closes the socket before returning.
-    /// The socket rides in an @unchecked Sendable box so the task
-    /// group's @Sendable child tasks may hold it (same pattern as
-    /// the codebase's other @unchecked Sendable holders).
-    static func openSession(url: URL) async throws -> Grant {
-        var request = URLRequest(url: url)
-        request.setValue("https://live.nicovideo.jp", forHTTPHeaderField: "Origin")
-        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-        let socket = URLSession.shared.webSocketTask(with: request)
-        socket.resume()
-        defer { socket.cancel(with: .normalClosure, reason: nil) }
-        let box = SocketBox(socket)
-        let startWatching = """
-            {"type":"startWatching","data":{"stream":{"quality":"abr","protocol":"hls","latency":"high","chasePlay":false},"room":{"protocol":"webSocket","commentable":false},"reconnect":false}}
-            """
-        let getAkashic = """
-            {"type":"getAkashic","data":{"chasePlay":false}}
-            """
-        try await socket.send(.string(startWatching))
-        try await socket.send(.string(getAkashic))
-        return try await withThrowingTaskGroup(of: Grant.self) { group in
-            group.addTask {
-                let socket = box.socket
-                var hasSeat = false
-                while true {
-                    let message: URLSessionWebSocketTask.Message = try await socket.receive()
-                    guard case .string(let text) = message,
-                          let data = text.data(using: .utf8),
-                          let json = JSONValue.parse(data) else { continue }
-                    switch json["type"].stringValue {
-                    case "ping":
-                        try? await socket.send(.string("{\"type\":\"pong\"}"))
-                    case "seat":
-                        hasSeat = true
-                    case "stream":
-                        guard hasSeat else { continue }
-                        return try Self.grant(fromStream: json["data"])
-                    case "error", "disconnect":
-                        throw LiveSiteError.invalidResponse
-                    default:
-                        continue
-                    }
-                }
-            }
-            group.addTask {
-                try await Task.sleep(for: .seconds(25))
-                throw LiveSiteError.networkUnavailable
-            }
-            guard let grant = try await group.next() else {
-                throw LiveSiteError.invalidResponse
-            }
-            group.cancelAll()
-            return grant
-        }
-    }
-
-    /// @unchecked Sendable holder for a WebSocket task (see
-    /// openSession).
-    final class SocketBox: @unchecked Sendable {
-        let socket: URLSessionWebSocketTask
-        init(_ socket: URLSessionWebSocketTask) { self.socket = socket }
-    }
-
-    /// Validate a "stream" message into a grant: https master URI
-    /// on livedelivery.dlive.nicovideo.jp + its cookies.
-    static func grant(fromStream data: JSONValue) throws -> Grant {
+    /// Validate a "stream" message into a grant (ref NiconicoApi.
+    /// grant): https master URI on livedelivery.dlive.nicovideo.jp
+    /// + its cookies. `quality` must be one of `availableQualities`
+    /// (1–32 distinct names); at most 64 cookies, each a token name
+    /// (not `__Host-`), a printable value without `;`, `"` or `\`,
+    /// a `/hls/…` path, domain `nicovideo.jp`, secure, `expires`
+    /// null or an HTTP date, no name twice on one path. Cookies
+    /// already expired at `now` are dropped, not fatal.
+    static func grant(fromStream data: JSONValue, now: Date = Date()) throws -> NiconicoGrant {
         guard data["protocol"].stringValue == "hls",
               let rawURI = data["uri"].stringValue,
               let uri = URL(string: rawURI),
@@ -450,8 +412,368 @@ enum NiconicoMaster {
               uri.path.hasSuffix(".m3u8") else {
             throw LiveSiteError.invalidResponse
         }
-        let cookies = data["cookies"].arrayValue.compactMap { cookiePair($0) }
-        return Grant(masterURL: uri, cookies: cookies)
+        let quality = data["quality"].stringValue
+        let qualities = data["availableQualities"].arrayValue.compactMap(\.stringValue)
+        guard let quality, !quality.isEmpty, qualities.count >= 1, qualities.count <= 32,
+              Set(qualities).count == qualities.count, qualities.contains(quality),
+              quality.range(of: #"^[A-Za-z0-9_.-]{1,64}$"#, options: .regularExpression) != nil,
+              qualities.allSatisfy({ $0.range(of: #"^[A-Za-z0-9_.-]{1,64}$"#, options: .regularExpression) != nil }) else {
+            throw LiveSiteError.invalidResponse
+        }
+        let rawCookies = data["cookies"].arrayValue
+        guard rawCookies.count <= 64 else { throw LiveSiteError.invalidResponse }
+        var cookies: [NiconicoCookie] = []
+        var seen = Set<String>()
+        for entry in rawCookies {
+            guard let cookie = try cookie(from: entry, now: now) else { continue }
+            guard seen.insert("\(cookie.path)\n\(cookie.name)").inserted else {
+                throw LiveSiteError.invalidResponse
+            }
+            cookies.append(cookie)
+        }
+        return NiconicoGrant(masterURL: uri, cookies: cookies)
     }
-#endif
+
+    /// Validate one stream-grant cookie row. Returns the cookie,
+    /// nil when it is already expired (dropped), throws when the
+    /// row is malformed.
+    static func cookie(from entry: JSONValue, now: Date = Date()) throws -> NiconicoCookie? {
+        guard let name = entry["name"].stringValue,
+              name.range(of: #"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"#, options: .regularExpression) != nil,
+              !name.hasPrefix("__Host-"),
+              let value = entry["value"].stringValue,
+              value.unicodeScalars.allSatisfy({ $0.value >= 0x21 && $0.value <= 0x7E }),
+              !value.contains(";"), !value.contains("\""), !value.contains("\\"),
+              let path = entry["path"].stringValue,
+              path.range(of: #"^/hls/[A-Za-z0-9_/-]+$"#, options: .regularExpression) != nil,
+              let domain = entry["domain"].stringValue,
+              domain == "nicovideo.jp" || domain == ".nicovideo.jp",
+              entry["secure"].boolValue == true else {
+            throw LiveSiteError.invalidResponse
+        }
+        var expires: Date?
+        if let rawExpires = entry["expires"].stringValue {
+            guard let date = Self.parseHTTPDate(rawExpires) else {
+                throw LiveSiteError.invalidResponse
+            }
+            expires = date
+        }
+        if let expires, expires <= now { return nil }
+        return NiconicoCookie(name: name, value: value, path: path, expires: expires)
+    }
+
+    /// An RFC 1123 HTTP date (`Mon, 28 Sep 2026 18:41:00 GMT`) in
+    /// UTC, or nil (ref NiconicoApi.parseHttpDate). The weekday is
+    /// stripped before parsing: it carries no information, and a
+    /// mismatched weekday must not fail a cookie.
+    static func parseHTTPDate(_ text: String) -> Date? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        let rest: String
+        if let comma = trimmed.firstIndex(of: ",") {
+            rest = String(trimmed[trimmed.index(after: comma)...]).trimmingCharacters(in: .whitespaces)
+        } else {
+            rest = trimmed
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "dd MMM yyyy HH:mm:ss 'GMT'"
+        return formatter.date(from: rest)
+    }
 }
+
+#if !os(Linux)
+extension NiconicoMaster {
+    /// Read the master playlist of the session's current grant
+    /// (ref NiconicoSite.discoverPlayQualitiesRaw: the master with
+    /// the seat's cookies for its path, 5 s budget). The seat stays
+    /// open — only NiconicoSite closes it when playback ends.
+    static func fetchVariants(session: NiconicoSession, http: HTTPClient) async throws -> [NiconicoVariant] {
+        guard let grant = session.currentGrant else { throw LiveSiteError.invalidResponse }
+        var headers = [
+            "User-Agent": "Mozilla/5.0",
+            "Origin": origin,
+            "Referer": "\(origin)/watch/\(session.programID)",
+        ]
+        if let cookie = grant.cookieHeader(for: grant.masterURL) {
+            headers["Cookie"] = cookie
+        }
+        let data = try await http.get(grant.masterURL.absoluteString, headers: headers, timeout: 5)
+        guard let text = String(data: data, encoding: .utf8) else { throw LiveSiteError.invalidResponse }
+        return parseVariants(text, baseURL: grant.masterURL)
+    }
+}
+
+/// A held niconico watch seat (ref NiconicoSeat,
+/// niconico_seat.dart): the WebSocket stays open for the whole
+/// playback. keepSeat is sent every keepIntervalSec (and on ping,
+/// together with pong); a later `stream` message replaces the
+/// grant; error / disconnect / 90 s of silence ends the seat.
+/// The owner (NiconicoSite) closes it when playback ends —
+/// closing the seat revokes the grant, so a closed seat's
+/// cookies must not be used again.
+final class NiconicoSession: @unchecked Sendable {
+    let programID: String
+    private let socket: URLSessionWebSocketTask
+    private let lock = NSLock()
+    private var _grant: NiconicoGrant?
+    private var _keepInterval: TimeInterval = 30
+    private var _closed = false
+    private var _ended = false
+    private var _lastMessageAt = Date()
+    private var _tasks: [Task<Void, Never>] = []
+
+    var isAlive: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !_closed && !_ended
+    }
+
+    var currentGrant: NiconicoGrant? {
+        lock.lock(); defer { lock.unlock() }
+        return _closed || _ended ? nil : _grant
+    }
+
+    var earliestExpiry: Date? { currentGrant?.earliestExpiry }
+
+    func cookieHeader(for url: URL) -> String? {
+        currentGrant?.cookieHeader(for: url)
+    }
+
+    private init(programID: String, socket: URLSessionWebSocketTask) {
+        self.programID = programID
+        self.socket = socket
+    }
+
+    /// Open a seat for an allowed, on-air program and wait for its
+    /// first grant (ref NiconicoSeat.open, startup timeout 20 s).
+    /// Throws when the program is not watchable anonymously.
+    static func open(watch: NiconicoWatch) async throws -> NiconicoSession {
+        guard watch.status == .onAir else { throw LiveSiteError.message("该节目未开播") }
+        guard watch.access == .allowed else {
+            switch watch.access {
+            case .loginRequired: throw LiveSiteError.message("该节目需要登录后才能观看")
+            case .regionRestricted: throw LiveSiteError.message("该节目在当前地区无法观看")
+            default: throw LiveSiteError.message("该节目暂时无法观看")
+            }
+        }
+        guard let socketURL = watch.webSocketURL, let frontendID = watch.frontendID else {
+            throw LiveSiteError.invalidResponse
+        }
+        var components = URLComponents(url: socketURL, resolvingAgainstBaseURL: false)
+        var items = components?.queryItems ?? []
+        items.append(URLQueryItem(name: "frontend_id", value: String(frontendID)))
+        components?.queryItems = items
+        guard let url = components?.url else { throw LiveSiteError.invalidResponse }
+        var request = URLRequest(url: url)
+        request.setValue("https://live.nicovideo.jp", forHTTPHeaderField: "Origin")
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        let socket = URLSession.shared.webSocketTask(with: request)
+        socket.resume()
+        let session = NiconicoSession(programID: watch.programID, socket: socket)
+        do {
+            try await socket.send(.string(Self.startWatchingMessage))
+            try await socket.send(.string(Self.getAkashicMessage))
+            try await session.waitForFirstGrant()
+        } catch {
+            socket.cancel(with: .normalClosure, reason: nil)
+            throw error
+        }
+        session.startBackgroundLoops()
+        return session
+    }
+
+    private static let startWatchingMessage = """
+        {"type":"startWatching","data":{"stream":{"quality":"abr","protocol":"hls","latency":"high","chasePlay":false},"room":{"protocol":"webSocket","commentable":false},"reconnect":false}}
+        """
+    private static let getAkashicMessage = """
+        {"type":"getAkashic","data":{"chasePlay":false}}
+        """
+
+    /// Wait for the seat + stream messages (ref NiconicoSeat.open:
+    /// 20 s startup timeout). Answers ping with pong. Incoming
+    /// frames queue in the socket, so nothing is lost when the
+    /// background loops start afterwards.
+    private func waitForFirstGrant() async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                var hasSeat = false
+                while true {
+                    let message = try await self.socket.receive()
+                    self.noteMessage()
+                    guard case .string(let text) = message,
+                          let data = text.data(using: .utf8),
+                          let json = JSONValue.parse(data) else { continue }
+                    switch json["type"].stringValue {
+                    case "ping":
+                        self.send("{\"type\":\"pong\"}")
+                        self.sendKeepSeat()
+                    case "seat":
+                        if let seconds = json["data"]["keepIntervalSec"].intValue,
+                           seconds >= 1, seconds <= 300 {
+                            self.setKeepInterval(TimeInterval(seconds))
+                        }
+                        hasSeat = true
+                    case "stream":
+                        guard hasSeat else { continue }
+                        let grant = try NiconicoMaster.grant(fromStream: json["data"])
+                        self.setGrant(grant)
+                        return
+                    case "error":
+                        throw Self.seatError(json["data"])
+                    case "disconnect":
+                        throw LiveSiteError.message("该节目已结束")
+                    default:
+                        continue
+                    }
+                }
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(20))
+                throw LiveSiteError.networkUnavailable
+            }
+            _ = try await group.next()
+            group.cancelAll()
+        }
+    }
+
+    /// The failure an `error` message reports, by `code`
+    /// (ref NiconicoApi.seatError; HAoLive has no rate-limit
+    /// error case, so too many connections is a message).
+    private static func seatError(_ data: JSONValue) -> LiveSiteError {
+        switch data["code"].stringValue {
+        case "NO_PERMISSION", "NOT_PLAYABLE", "TICKET_REQUIRED":
+            return .message("该节目需要登录后才能观看")
+        case "TOO_MANY_CONNECTIONS", "CONNECT_ERROR":
+            return .message("连接数过多，请稍后再试")
+        case "INVALID_STREAM_QUALITY", "INVALID_MESSAGE":
+            return .invalidResponse
+        default:
+            return .message("该节目暂时无法观看")
+        }
+    }
+
+    /// Receive loop + keep-alive + silence watchdog for the whole
+    /// playback (ref NiconicoSeat: keepSeat every keepIntervalSec,
+    /// ping answered with pong and one more keepSeat, 90 s of
+    /// silence ends the seat).
+    private func startBackgroundLoops() {
+        let receive = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                do {
+                    let message = try await self.socket.receive()
+                    self.noteMessage()
+                    guard case .string(let text) = message,
+                          let data = text.data(using: .utf8),
+                          let json = JSONValue.parse(data) else { continue }
+                    switch json["type"].stringValue {
+                    case "ping":
+                        self.send("{\"type\":\"pong\"}")
+                        self.sendKeepSeat()
+                    case "seat":
+                        if let seconds = json["data"]["keepIntervalSec"].intValue,
+                           seconds >= 1, seconds <= 300 {
+                            self.setKeepInterval(TimeInterval(seconds))
+                        }
+                    case "stream":
+                        if let grant = try? NiconicoMaster.grant(fromStream: json["data"]) {
+                            self.setGrant(grant)
+                        }
+                    case "error", "disconnect":
+                        self.markEnded()
+                        return
+                    default:
+                        continue
+                    }
+                } catch {
+                    self.markEnded()
+                    return
+                }
+            }
+        }
+        let keepAlive = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(self.keepInterval()))
+                guard !Task.isCancelled, self.isAlive else { break }
+                self.sendKeepSeat()
+            }
+        }
+        let watchdog = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled, self.isAlive else { break }
+                let silent: Bool = {
+                    self.lock.lock()
+                    defer { self.lock.unlock() }
+                    return Date().timeIntervalSince(self._lastMessageAt) > 90
+                }()
+                if silent {
+                    self.markEnded()
+                    break
+                }
+            }
+        }
+        lock.lock()
+        _tasks = [receive, keepAlive, watchdog]
+        lock.unlock()
+    }
+
+    /// Ends the seat: timers stop, the grant is revoked and the
+    /// socket is closed (ref NiconicoSeat.close). Idempotent.
+    func close() {
+        let tasks: [Task<Void, Never>] = {
+            lock.lock()
+            defer { lock.unlock() }
+            if _closed { return [] }
+            _closed = true
+            _grant = nil
+            return _tasks
+        }()
+        for task in tasks { task.cancel() }
+        socket.cancel(with: .normalClosure, reason: nil)
+    }
+
+    private func markEnded() {
+        lock.lock()
+        let already = _closed || _ended
+        _ended = true
+        lock.unlock()
+        guard !already else { return }
+        socket.cancel(with: .normalClosure, reason: nil)
+    }
+
+    private func noteMessage() {
+        lock.lock()
+        _lastMessageAt = Date()
+        lock.unlock()
+    }
+
+    private func setGrant(_ grant: NiconicoGrant) {
+        lock.lock()
+        _grant = grant
+        lock.unlock()
+    }
+
+    private func setKeepInterval(_ interval: TimeInterval) {
+        lock.lock()
+        _keepInterval = interval
+        lock.unlock()
+    }
+
+    private func keepInterval() -> TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        return _keepInterval
+    }
+
+    private func send(_ text: String) {
+        Task { try? await self.socket.send(.string(text)) }
+    }
+
+    private func sendKeepSeat() {
+        send("{\"type\":\"keepSeat\"}")
+    }
+}
+#endif

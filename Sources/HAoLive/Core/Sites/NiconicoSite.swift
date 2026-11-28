@@ -47,6 +47,29 @@ final class NiconicoSite: LiveSite, @unchecked Sendable {
     let platform: LivePlatform = .niconico
     private let http = HTTPClient.shared
 
+    /// The held watch seat of the room being played (ref
+    /// NiconicoSeat: owned by whoever opened it, kept for the
+    /// whole playback). The site is a SiteRegistry singleton, so
+    /// one seat is held at a time; opening another program's seat
+    /// closes this one, and the room view closes it on exit.
+#if !os(Linux)
+    private let sessionLock = NSLock()
+    private var heldSession: NiconicoSession?
+#endif
+
+    func endPlaybackSession() {
+#if !os(Linux)
+        let session: NiconicoSession? = {
+            sessionLock.lock()
+            defer { sessionLock.unlock() }
+            let session = heldSession
+            heldSession = nil
+            return session
+        }()
+        session?.close()
+#endif
+    }
+
     private static let origin = "https://live.nicovideo.jp"
 
     /// Fixed recent tabs (Pure Live's NiconicoDirectory.categories).
@@ -61,9 +84,21 @@ final class NiconicoSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Categories (fixed tabs)
 
+    /// Ref NiconicoApi.tabNames (3.x's zh.json): the tabs do have
+    /// display names — the old code exposed the raw tab id.
+    static let tabNames = [
+        "common": "综合",
+        "try": "创作与挑战",
+        "live": "游戏",
+        "req": "视频介绍",
+        "face": "露脸直播",
+        "totu": "连麦互动",
+        "vtuber": "VTuber",
+    ]
+
     func categories() async throws -> [LiveCategory] {
         Self.tabs.map { tab in
-            LiveCategory(id: "niconico-\(tab)", platform: .niconico, name: tab, iconName: nil, iconURL: nil)
+            LiveCategory(id: "niconico-\(tab)", platform: .niconico, name: Self.tabNames[tab] ?? tab, iconName: nil, iconURL: nil)
         }
     }
 
@@ -154,7 +189,7 @@ final class NiconicoSite: LiveSite, @unchecked Sendable {
     static func roomIDOf(programID: String, providerType: String, providerID: String?, channelID: String?) -> String {
         if (providerType == "community" || providerType == "user"),
            let user = providerID,
-           user.range(of: #"^[1-9][0-9]{0,17}$"#, options: .regularExpression) != nil {
+           user.range(of: #"^[1-9][0-9]{0,18}$"#, options: .regularExpression) != nil {
             return "user/\(user)"
         }
         if providerType == "channel",
@@ -257,29 +292,60 @@ final class NiconicoSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Play URLs (watch session + master relay)
 
-    func playURLs(room: LiveRoom) async throws -> [PlayStream] {
-        let programID: String
-        if NiconicoWatch.isProgramID(room.roomID) {
-            programID = room.roomID
-        } else {
-            // Broadcaster ids resolve to the current program first.
-            let watch = try await NiconicoMaster.fetchWatch(programOrRoomID: room.roomID, http: http)
-            programID = watch.programID
-        }
-        let watch = try await NiconicoMaster.fetchWatch(programOrRoomID: programID, http: http)
 #if !os(Linux)
-        let (variants, cookieHeader) = try await NiconicoMaster.fetchVariants(watch: watch, http: http)
-        let headers: [String: String] = [
-            "user-agent": "Mozilla/5.0",
-            "origin": NiconicoMaster.origin,
-            "referer": "\(NiconicoMaster.origin)/watch/\(programID)",
-            "cookie": cookieHeader,
-        ]
+    /// The seat of `watch`'s program: the held one when it is
+    /// alive (quality switches and lease refreshes re-read the
+    /// master through it, no new seat), else a fresh seat — the
+    /// old one is closed first (ref: a seat is owned by whoever
+    /// opened it; a later `stream` replaces the grant, and the
+    /// seat's end revokes it).
+    private func heldSession(for watch: NiconicoWatch) async throws -> NiconicoSession {
+        let existing: NiconicoSession? = {
+            sessionLock.lock()
+            defer { sessionLock.unlock() }
+            return heldSession
+        }()
+        if let existing, existing.programID == watch.programID, existing.isAlive {
+            return existing
+        }
+        existing?.close()
+        let fresh = try await NiconicoSession.open(watch: watch)
+        sessionLock.lock()
+        heldSession = fresh
+        sessionLock.unlock()
+        return fresh
+    }
+#endif
+
+    func playURLs(room: LiveRoom) async throws -> [PlayStream] {
+#if !os(Linux)
+        // One watch-page read: a broadcaster id resolves to its
+        // program through the same page (the old code fetched the
+        // page twice for broadcaster rooms; the reference keeps
+        // the just-read page as the seat bootstrap for 60 s).
+        let watch = try await NiconicoMaster.fetchWatch(programOrRoomID: room.roomID, http: http)
+        let session = try await heldSession(for: watch)
+        let variants = try await NiconicoMaster.fetchVariants(session: session, http: http)
+        guard !variants.isEmpty else { throw LiveSiteError.invalidResponse }
+        // Per-variant cookie headers (ref NiconicoGrant.
+        // cookieHeaderFor): each variant carries only the cookies
+        // of its own path. The earliest cookie expiry is the
+        // lease the player refreshes before (LivePlayerService.
+        // scheduleLeaseRefresh), so a refresh re-reads the master
+        // through the still-held seat instead of letting the
+        // picture freeze when the grant dies.
         return variants.map { variant in
-            PlayStream(url: variant.url, quality: variant.label, line: "主线路", headers: headers)
+            var headers: [String: String] = [
+                "user-agent": "Mozilla/5.0",
+                "origin": NiconicoMaster.origin,
+                "referer": "\(NiconicoMaster.origin)/watch/\(watch.programID)",
+            ]
+            if let cookie = session.cookieHeader(for: variant.url) {
+                headers["cookie"] = cookie
+            }
+            return PlayStream(url: variant.url, quality: variant.label, line: "主线路", headers: headers, expiresAt: session.earliestExpiry)
         }
 #else
-        _ = watch
         throw LiveSiteError.notImplemented
 #endif
     }

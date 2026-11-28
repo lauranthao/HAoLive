@@ -17,9 +17,10 @@
 //   detail  GET api-dsa.17app.co/api/v1/lives/{liveStreamID}
 //           -> room + streams (status 2 = live, 0 = offline;
 //           pullURLsInfo.rtmpURLs[] / rtmpUrls[] carry the FLV
-//           lines: urlQualityEnhancedHD / urlLowBitrateHD /
-//           webUrl / url / url264 / urlLowQuality /
-//           webUrlLowQuality / urlHighQuality)
+//           lines: 原画 = urlLowQuality / webUrlLowQuality /
+//           urlHighQuality; 增强高清 = urlQualityEnhancedHD;
+//           高清 = urlLowBitrateHD / webUrl / url;
+//           H.264 = url264; order H.264, 原画, 增强高清, 高清)
 //   Headers: Accept-Language ja-JP + Origin/Referer
 //           https://17.live on catalogue calls.
 // Streams are FLV (pull-rtmp*.17app.co, .flv path) — used
@@ -70,20 +71,46 @@ final class SeventeenLiveSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Lists
 
-    /// No category tree on 17LIVE (sections are curated rows,
-    /// not browsable categories).
-    func categories() async throws -> [LiveCategory] { [] }
+    /// One category, three regions (ref seventeenlive_api.dart:
+    /// category "地区", areas JP日本 / TW台湾 / HK香港). The
+    /// recommendations are the JP sections, as in the ref.
+    func categories() async throws -> [LiveCategory] {
+        [
+            LiveCategory(id: "JP", platform: .seventeenlive, name: "日本", iconName: nil),
+            LiveCategory(id: "TW", platform: .seventeenlive, name: "台湾", iconName: nil),
+            LiveCategory(id: "HK", platform: .seventeenlive, name: "香港", iconName: nil),
+        ]
+    }
 
     func recommendRooms() async throws -> [LiveRoom] {
-        let page = try await directory(cursor: nil)
-        return page.rooms
+        try await directoryPage(page: 1, region: "JP")
     }
 
     func recommendRooms(page: Int) async throws -> [LiveRoom] {
+        try await directoryPage(page: page, region: "JP")
+    }
+
+    func categoryRooms(_ category: LiveCategory) async throws -> [LiveRoom] {
+        try await directoryPage(page: 1, region: Self.region(of: category))
+    }
+
+    func categoryRooms(_ category: LiveCategory, page: Int) async throws -> [LiveRoom] {
+        try await directoryPage(page: page, region: Self.region(of: category))
+    }
+
+    /// The region code of a category (ref regionOf): JP / TW / HK,
+    /// JP for anything else.
+    private static func region(of category: LiveCategory) -> String {
+        let code = category.id.uppercased()
+        return (code == "JP" || code == "TW" || code == "HK") ? code : "JP"
+    }
+
+    /// One directory page by number, replayed from page 1 by cursor.
+    private func directoryPage(page: Int, region: String) async throws -> [LiveRoom] {
         guard page >= 1, page <= 20 else { return [] }
         var cursor: String? = nil
         for current in 1...page {
-            let result = try await directory(cursor: cursor)
+            let result = try await directory(cursor: cursor, region: region)
             if current == page { return result.rooms }
             guard let next = result.nextCursor else { return [] }
             cursor = next
@@ -91,18 +118,10 @@ final class SeventeenLiveSite: LiveSite, @unchecked Sendable {
         return []
     }
 
-    func categoryRooms(_ category: LiveCategory) async throws -> [LiveRoom] {
-        try await recommendRooms()
-    }
-
-    func categoryRooms(_ category: LiveCategory, page: Int) async throws -> [LiveRoom] {
-        try await recommendRooms(page: page)
-    }
-
     /// One sections page: live rooms + the next cursor (nil at
     /// the end). Banner / archive / VOD sections are skipped.
-    private func directory(cursor: String?) async throws -> (rooms: [LiveRoom], nextCursor: String?) {
-        var url = "\(Self.apiBase)/sections?count=20&typeTab=2&region=JP&cursor="
+    private func directory(cursor: String?, region: String = "JP") async throws -> (rooms: [LiveRoom], nextCursor: String?) {
+        var url = "\(Self.apiBase)/sections?count=20&typeTab=2&region=\(region)&cursor="
         if let cursor { url += cursor.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? cursor }
         let json = try await http.getJSON(url, headers: Self.catalogHeaders)
         return Self.directory(fromJSON: json, cursor: cursor)
@@ -155,16 +174,17 @@ final class SeventeenLiveSite: LiveSite, @unchecked Sendable {
     /// that room.
     private func search(keyword: String, page: Int = 1) async throws -> [LiveRoom] {
         guard page == 1 else { return [] }
-        let query = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty, query.count <= 100 else { return [] }
+        // Ref searchKeyword: trim, cut to 100 characters (never refuse).
+        let query = String(keyword.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
+        guard !query.isEmpty else { return [] }
         if let roomID = Self.roomID(from: query) {
             if let room = try? await roomDetail(roomID: roomID) {
                 return [room]
             }
             return []
         }
-        guard !query.lowercased().hasPrefix("http://"),
-              !query.lowercased().hasPrefix("https://") else { return [] }
+        // Ref isUrl: any "<scheme>://" is not a keyword.
+        if Self.isURL(query) { return [] }
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
         let json = try await http.getJSON(
             "\(Self.apiBase)/liveStreams/search?query=\(encoded)", headers: Self.catalogHeaders)
@@ -208,6 +228,14 @@ final class SeventeenLiveSite: LiveSite, @unchecked Sendable {
         guard !text.isEmpty, text.count <= 12, text.first != "0",
               text.allSatisfy({ $0.isNumber }) else { return false }
         return true
+    }
+
+    /// Whether the text is a web address ("<scheme>://…", ref isUrl).
+    static func isURL(_ text: String) -> Bool {
+        guard let sep = text.range(of: "://") else { return false }
+        let scheme = text[..<sep.lowerBound]
+        guard let first = scheme.first, first.isLetter else { return false }
+        return scheme.allSatisfy { $0.isLetter || $0.isNumber || $0 == "+" || $0 == "-" || $0 == "." }
     }
 
     // MARK: - Room detail
@@ -301,8 +329,9 @@ final class SeventeenLiveSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Play URLs
 
-    /// FLV lines, best quality first. The detail call is made
-    /// fresh every time (streams are signed and short-lived).
+    /// FLV lines, best quality first (H.264 first, ref default
+    /// "优先 H.264"). The detail call is made fresh every time
+    /// (streams are signed and short-lived).
     /// Paid / subscribers-only / offline rooms yield [].
     func playURLs(room: LiveRoom) async throws -> [PlayStream] {
         guard let id = Self.roomID(from: room.roomID) else { return [] }
@@ -311,7 +340,7 @@ final class SeventeenLiveSite: LiveSite, @unchecked Sendable {
            let streams = Self.streams(fromPlayDataJSON: playData),
            !streams.isEmpty {
             return streams.map { stream in
-                PlayStream(url: stream.url, quality: stream.quality, line: "主线路",
+                PlayStream(url: stream.url, quality: stream.quality, line: stream.line,
                            headers: Self.mediaHeaders(roomID: id))
             }
         }
@@ -321,22 +350,31 @@ final class SeventeenLiveSite: LiveSite, @unchecked Sendable {
               let streams = Self.streams(fromPlayDataJSON: playData),
               !streams.isEmpty else { return [] }
         return streams.map { stream in
-            PlayStream(url: stream.url, quality: stream.quality, line: "主线路",
+            PlayStream(url: stream.url, quality: stream.quality, line: stream.line,
                        headers: Self.mediaHeaders(roomID: id))
         }
     }
 
-    /// One quality tier from /lives/{id}.
+    /// One quality tier from /lives/{id}. `line` is the serving CDN
+    /// (ref LivePlayLine.lineId: "tencent" / "wansu", …).
     struct StreamTier {
         let quality: String
         let url: URL
+        var line: String = "主线路"
     }
 
     /// Pure parser for the stream tiers of a /lives/{id} body:
-    /// pullURLsInfo.rtmpURLs[] (or rtmpUrls[]) mapped to
-    /// enhanced > hd > h264 > standard. URLs must be https FLV
-    /// from pull-rtmp*.17app.co and are used verbatim. Testable
-    /// without the network.
+    /// pullURLsInfo.rtmpURLs[] (or rtmpUrls[]). Ref qualityFields
+    /// (seventeenlive_api.dart): 原画 (source) = urlLowQuality /
+    /// webUrlLowQuality / urlHighQuality; 增强高清 = urlQualityEnhancedHD;
+    /// 高清 = urlLowBitrateHD / webUrl / url; H.264 = url264. Order with
+    /// "优先 H.264" on (ref default): H.264, 原画, 增强高清, 高清.
+    /// Wansu (provider 5) serves no H.264 transcode: its url264 is
+    /// skipped, and when the first CDN is Wansu the H.264 tier is
+    /// dropped entirely. URLs must be https FLV from pull-rtmp*.17app.co;
+    /// http is upgraded to https (ref pullUrl), except an explicit
+    /// non-80 port, which is kept as given.
+    /// Testable without the network.
     static func streams(fromData data: JSONValue) -> [StreamTier] {
         var providers: [JSONValue] = []
         let pull = data["pullURLsInfo"]
@@ -346,35 +384,61 @@ final class SeventeenLiveSite: LiveSite, @unchecked Sendable {
         if providers.isEmpty {
             providers = data["rtmpUrls"].arrayValue
         }
-        // quality id -> (display name, [urls]) in first-seen order.
-        var tiers: [(id: String, name: String, urls: [URL])] = []
-        func add(_ qualityID: String, _ name: String, _ value: JSONValue) {
+        func cdn(of url: URL) -> String {
+            url.host?.lowercased().split(separator: "-").first.map(String.init) ?? ""
+        }
+        // quality id -> (display name, [(url, line)]) in first-seen order.
+        var tiers: [(id: String, name: String, urls: [(url: URL, line: String)])] = []
+        var firstCdn: String? = nil
+        func add(_ qualityID: String, _ name: String, _ value: JSONValue, providerCdn: String) {
+            // Ref untranscodedCdns: never read url264 from Wansu.
+            if qualityID == "h264", providerCdn == "wansu" { return }
             guard let raw = value.stringValue, !raw.isEmpty,
                   let url = mediaURL(raw) else { return }
+            let line = cdn(of: url)
             if let index = tiers.firstIndex(where: { $0.id == qualityID }) {
-                if !tiers[index].urls.contains(url) { tiers[index].urls.append(url) }
+                if !tiers[index].urls.contains(where: { $0.url == url }) {
+                    tiers[index].urls.append((url: url, line: line))
+                }
             } else {
-                tiers.append((id: qualityID, name: name, urls: [url]))
+                tiers.append((id: qualityID, name: name, urls: [(url: url, line: line)]))
             }
         }
         for provider in providers {
-            add("enhanced", "超高清", provider["urlQualityEnhancedHD"])
-            add("hd", "高清", provider["urlLowBitrateHD"])
-            add("hd", "高清", provider["webUrl"])
-            add("hd", "高清", provider["url"])
-            add("h264", "H.264", provider["url264"])
-            add("standard", "流畅", provider["urlLowQuality"])
-            add("standard", "流畅", provider["webUrlLowQuality"])
-            add("standard", "流畅", provider["urlHighQuality"])
+            // The CDN serving this provider: first host prefix among
+            // its pull URLs (ref: host.split('-').first).
+            var providerCdn = ""
+            for field in ["urlLowQuality", "webUrlLowQuality", "urlHighQuality",
+                          "urlQualityEnhancedHD", "urlLowBitrateHD", "webUrl",
+                          "url", "url264"] {
+                if let raw = provider[field].stringValue,
+                   let url = mediaURL(raw) {
+                    providerCdn = cdn(of: url)
+                    break
+                }
+            }
+            if firstCdn == nil, !providerCdn.isEmpty { firstCdn = providerCdn }
+            add("source", "原画", provider["urlLowQuality"], providerCdn: providerCdn)
+            add("source", "原画", provider["webUrlLowQuality"], providerCdn: providerCdn)
+            add("source", "原画", provider["urlHighQuality"], providerCdn: providerCdn)
+            add("enhanced", "增强高清", provider["urlQualityEnhancedHD"], providerCdn: providerCdn)
+            add("hd", "高清", provider["urlLowBitrateHD"], providerCdn: providerCdn)
+            add("hd", "高清", provider["webUrl"], providerCdn: providerCdn)
+            add("hd", "高清", provider["url"], providerCdn: providerCdn)
+            add("h264", "H.264", provider["url264"], providerCdn: providerCdn)
         }
-        let order = ["enhanced": 0, "hd": 1, "h264": 2, "standard": 3]
+        // Ref: when the first CDN is Wansu, drop the H.264 tier.
+        if firstCdn == "wansu" { tiers.removeAll { $0.id == "h264" } }
+        let order = ["h264": 0, "source": 1, "enhanced": 2, "hd": 3]
         return tiers
             .sorted { (order[$0.id] ?? 99) < (order[$1.id] ?? 99) }
-            .flatMap { tier in tier.urls.map { StreamTier(quality: tier.name, url: $0) } }
+            .flatMap { tier in tier.urls.map { StreamTier(quality: tier.name, url: $0.url, line: $0.line) } }
     }
 
-    /// Validate a stream URL (https, pull-rtmp*.17app.co, .flv)
-    /// and return it VERBATIM. Testable without the network.
+    /// Validate a stream URL (https, pull-rtmp*.17app.co, .flv).
+    /// Ref pullUrl: http is upgraded to https, except an explicit
+    /// non-80 port (its https port is unknown). Testable without
+    /// the network.
     static func mediaURL(_ raw: String) -> URL? {
         guard !raw.isEmpty, !raw.contains(" "),
               let url = URL(string: raw),
@@ -382,6 +446,12 @@ final class SeventeenLiveSite: LiveSite, @unchecked Sendable {
               let host = url.host?.lowercased(),
               host.hasSuffix(".17app.co"), host.contains("pull-rtmp"),
               url.path.lowercased().hasSuffix(".flv") else { return nil }
+        if url.scheme?.lowercased() == "http",
+           (url.port == nil || url.port == 80),
+           var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.scheme = "https"
+            return components.url ?? url
+        }
         return url
     }
 
@@ -389,7 +459,7 @@ final class SeventeenLiveSite: LiveSite, @unchecked Sendable {
     /// roomDetail so playURLs can skip a re-fetch when fresh).
     static func streamsJSON(_ tiers: [StreamTier]) -> String? {
         let items = tiers.map { tier in
-            "{\"quality\":\"\(tier.quality)\",\"url\":\"\(tier.url.absoluteString)\"}"
+            "{\"quality\":\"\(tier.quality)\",\"url\":\"\(tier.url.absoluteString)\",\"line\":\"\(tier.line)\"}"
         }.joined(separator: ",")
         return "[\(items)]"
     }
@@ -402,7 +472,7 @@ final class SeventeenLiveSite: LiveSite, @unchecked Sendable {
             guard let quality = item["quality"].stringValue,
                   let raw = item["url"].stringValue,
                   let url = URL(string: raw) else { return nil }
-            return StreamTier(quality: quality, url: url)
+            return StreamTier(quality: quality, url: url, line: item["line"].stringValue ?? "主线路")
         }
         return tiers.isEmpty ? nil : tiers
     }

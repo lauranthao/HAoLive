@@ -77,7 +77,12 @@ struct FavoritesView: View {
 
     var body: some View {
         ScrollView {
-            if favoritesStore.entries.isEmpty {
+            // NOTE: a ScrollView's implicit VStack is center-aligned,
+            // so every fixed-width child (status chips row, status
+            // text) was rendered centered while full-width children
+            // looked left-aligned. Explicit leading alignment fixes it.
+            VStack(alignment: .leading, spacing: 0) {
+                if favoritesStore.entries.isEmpty {
                 ContentUnavailableView(
                     "还没有收藏的房间",
                     systemImage: "heart",
@@ -96,6 +101,8 @@ struct FavoritesView: View {
                     Text("直播状态更新于 \(last, style: .relative)前")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, HaoLiveDesign.pagePadding)
                         .padding(.vertical, 4)
                 }
                 LazyVGrid(columns: columns, spacing: HaoLiveDesign.gridSpacing) {
@@ -123,6 +130,7 @@ struct FavoritesView: View {
                     ContentUnavailableView("没有符合条件的收藏", systemImage: "heart.slash")
                         .padding(.top, HaoLiveDesign.emptyStateTopPadding)
                 }
+            }
             }
         }
         .refreshable {
