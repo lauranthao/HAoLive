@@ -97,35 +97,114 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Search
 
+    /// Huya's search (Pure Live's getSearchContent, huya_site.dart:268):
+    /// search.cdn.huya.com answers a request without a User-Agent with
+    /// HTTP 403, so the mobile-Chrome UA is sent (HTTPClient's default
+    /// desktop UA is overridden per request). Verified live 2026-11-28:
+    /// searching "DANK1NG" returns response['3']['docs'] rooms (room_id
+    /// 10188) and response['1']['docs'] streamers. The old
+    /// search.huya.com/api/search endpoint returns "not supported
+    /// function" and is gone.
+    private static let searchUserAgent = "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36 Edg/117.0.0.0"
+
     func searchRooms(keyword: String) async throws -> [LiveRoom] {
-        try await search(keyword: keyword, page: 1)
+        try await searchRooms(keyword: keyword, page: 1)
     }
 
     func searchAnchors(keyword: String) async throws -> [LiveRoom] {
-        try await search(keyword: keyword, page: 1)
+        try await searchAnchors(keyword: keyword, page: 1)
     }
 
     func searchRooms(keyword: String, page: Int) async throws -> [LiveRoom] {
-        try await search(keyword: keyword, page: page)
+        let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, page >= 1 else { return [] }
+        let json = try await searchJSON(keyword: trimmed, page: page)
+        return Self.rooms(fromSearchJSON: json, page: page)
     }
 
     func searchAnchors(keyword: String, page: Int) async throws -> [LiveRoom] {
-        try await search(keyword: keyword, page: page)
+        let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, page >= 1 else { return [] }
+        let json = try await searchJSON(keyword: trimmed, page: page)
+        return Self.anchors(fromSearchJSON: json)
     }
 
-    /// Huya's search API. Unverified from this VM (the response shape
-    /// is parsed defensively); needs a device to confirm.
-    private func search(keyword: String, page: Int = 1) async throws -> [LiveRoom] {
+    private func searchJSON(keyword: String, page: Int) async throws -> JSONValue {
         let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
-        let url = "https://search.huya.com/api/search?huyaSearchType=live&search=\(encoded)&page=\(page)"
-        let json = try await http.getJSON(url, headers: ["Referer": "\(Self.webBase)/"])
-        let items: [JSONValue]
-        if !json["data"].arrayValue.isEmpty {
-            items = json["data"].arrayValue
-        } else {
-            items = json["data"]["list"].arrayValue
+        let rows = 20
+        let start = max(page - 1, 0) * rows
+        let url = "https://search.cdn.huya.com/?m=Search&do=getSearchContent&q=\(encoded)&uid=0&v=1&typ=-5&livestate=0&rows=\(rows)&start=\(start)"
+        return try await http.getJSON(url, headers: ["User-Agent": Self.searchUserAgent])
+    }
+
+    /// Pure parser for getSearchContent rooms (response['3']['docs']).
+    /// Testable without the network.
+    static func rooms(fromSearchJSON json: JSONValue, page: Int) -> [LiveRoom] {
+        let response = json["response"]
+        let docs = response["3"]["docs"].arrayValue
+        let streamers = response["1"]["docs"].arrayValue
+        let rows = 20
+        let start = max(page - 1, 0) * rows
+        // The server usually honours `start` itself; this is the
+        // ref's safety net for a response longer than one page.
+        let skipped = docs.count > rows ? min(max(start, 0), docs.count) : 0
+        var seen: Set<String> = []
+        var rooms: [LiveRoom] = []
+        for (index, doc) in docs.enumerated() {
+            guard let id = Self.roomID(ofSearchDoc: doc, streamers: streamers), !id.isEmpty,
+                  seen.insert(id).inserted, index >= skipped else { continue }
+            rooms.append(LiveRoom(
+                id: "huya-\(id)",
+                platform: .huya,
+                roomID: id,
+                title: HaoText.firstNonEmpty(doc["game_introduction"].stringValue, doc["game_roomName"].stringValue) ?? "",
+                anchorName: doc["game_nick"].stringValue ?? "",
+                anchorAvatarURL: Self.imageURL(doc["game_imgUrl"].stringValue),
+                coverURL: Self.imageURL(doc["game_screenshot"].stringValue),
+                categoryName: doc["gameName"].stringValue,
+                viewerCount: doc["game_total_count"].intValue ?? 0,
+                isLive: true
+            ))
         }
-        return items.map(Self.room(fromListItem:))
+        return rooms
+    }
+
+    /// The room id of a search doc: the matching streamer's room_id
+    /// (same uid + yyid), else the doc's own room_id.
+    private static func roomID(ofSearchDoc doc: JSONValue, streamers: [JSONValue]) -> String? {
+        if let uid = doc["uid"].stringValue, !uid.isEmpty,
+           let yyid = doc["yyid"].stringValue, !yyid.isEmpty {
+            for streamer in streamers {
+                if streamer["uid"].stringValue == uid && streamer["yyid"].stringValue == yyid,
+                   let id = streamer["room_id"].stringValue, !id.isEmpty {
+                    return id
+                }
+            }
+        }
+        return doc["room_id"].stringValue
+    }
+
+    /// Pure parser for getSearchContent streamers (response['1']['docs']).
+    /// Testable without the network.
+    static func anchors(fromSearchJSON json: JSONValue) -> [LiveRoom] {
+        let streamers = json["response"]["1"]["docs"].arrayValue
+        var seen: Set<String> = []
+        return streamers.compactMap { doc in
+            guard let id = doc["room_id"].stringValue, !id.isEmpty, seen.insert(id).inserted else { return nil }
+            let nick = doc["game_nick"].stringValue ?? ""
+            return LiveRoom(
+                id: "huya-\(id)",
+                platform: .huya,
+                roomID: id,
+                title: nick,
+                anchorName: nick,
+                anchorAvatarURL: Self.imageURL(doc["game_avatarUrl180"].stringValue),
+                coverURL: nil,
+                categoryName: doc["game_name"].stringValue,
+                viewerCount: 0,
+                isLive: doc["gameLiveOn"].boolValue == true || doc["gameLiveOn"].intValue == 1
+            )
+        }
     }
 
     // MARK: - Room detail

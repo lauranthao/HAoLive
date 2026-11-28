@@ -94,13 +94,74 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Search
 
+    /// Kuaishou's search (Pure Live's live_api/search/author,
+    /// kuaishou_site.dart:380): streamers, live or not — the live-stream
+    /// search answers guests "服务器繁忙", so the author search is the
+    /// one that works. Verified live 2026-11-28: the endpoint answers
+    /// {"data":{"type":"authors","list":[...],"result":1}} (result 1 =
+    /// no results). `result` 2 is rate-limited and 10 is risk control;
+    /// both read as no results, like 3.x. The URL keeps the empty
+    /// `lssid=` (the site expects it). The keyword-as-link shortcut in
+    /// the ref is skipped — links go through the toolbox instead.
     func searchRooms(keyword: String) async throws -> [LiveRoom] {
-        // No verified search endpoint for Kuaishou live.
-        []
+        try await searchRooms(keyword: keyword, page: 1)
     }
 
     func searchAnchors(keyword: String) async throws -> [LiveRoom] {
-        []
+        try await searchAnchors(keyword: keyword, page: 1)
+    }
+
+    func searchRooms(keyword: String, page: Int) async throws -> [LiveRoom] {
+        let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, page >= 1 else { return [] }
+        let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmed
+        let url = "\(Self.webBase)/live_api/search/author?keyword=\(encoded)&page=\(page)&lssid="
+        let json = try await http.getJSON(url, headers: ["Referer": "\(Self.webBase)/search?keyword=\(encoded)"])
+        return try Self.rooms(fromSearchJSON: json)
+    }
+
+    func searchAnchors(keyword: String, page: Int) async throws -> [LiveRoom] {
+        try await searchRooms(keyword: keyword, page: page)
+    }
+
+    /// Pure parser for the search/author response. Testable without the
+    /// network.
+    static func rooms(fromSearchJSON json: JSONValue) throws -> [LiveRoom] {
+        let data = json["data"]
+        let list = data["list"]
+        if list.isNull {
+            // result 1 without a list: the no-result answer.
+            // result 2 (rate-limited) and 10 (risk control) are also
+            // read as no results.
+            switch data["result"].intValue {
+            case 1, 2, 10, nil:
+                return []
+            default:
+                throw LiveSiteError.invalidResponse
+            }
+        }
+        return list.arrayValue.compactMap(Self.room(fromSearchAuthor:))
+    }
+
+    /// Pure parser for one search/author author. No audience figure is
+    /// returned, so viewerCount stays 0 instead of a fake number.
+    static func room(fromSearchAuthor author: JSONValue) -> LiveRoom? {
+        guard let id = author["id"].stringValue, !id.isEmpty else { return nil }
+        let name = author["name"].stringValue ?? ""
+        let avatar = Self.imageURL(author["avatar"].stringValue)
+        let banned = author["bannedStatus"]["banned"].boolValue == true
+        return LiveRoom(
+            id: "kuaishou-\(id)",
+            platform: .kuaishou,
+            roomID: id,
+            title: name,
+            anchorName: name,
+            anchorAvatarURL: avatar,
+            coverURL: avatar,
+            categoryName: nil,
+            viewerCount: 0,
+            isLive: !banned && author["living"].boolValue == true
+        )
     }
 
     // MARK: - Room detail

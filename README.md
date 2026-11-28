@@ -7,9 +7,11 @@ HAo Live — 直播应用，参照 Pure Live 的**功能**，界面与实现均�
 - 平台：iOS 17+，Swift 6，SwiftUI，mpv 单一播放器（MPVKit 1.1.0-n9.0.2，FLV 走 mpv session 内拼接；无系统播放器兜底、无内核切换）
 - 无强制登录；收藏与历史只存本机
 - 无启动动画：进应用直接到主界面
-- 当前版本：0.1.0 build 19（2026-11-28）
+- 当前版本：0.1.0 build 20（2026-11-28）
 
 ## 版本历史
+
+- **0.1.0 build 20（2026-11-28）：** 搜索“搜不到人”修了，三个站的搜索接口全换成 Pure Live 的：① 虎牙——旧的 search.huya.com 直接回 "not supported function"，改走 search.cdn.huya.com 的 getSearchContent（带移动 Chrome UA），房间和主播分开解析（房间走 response.3，主播走 response.1，uid+yyid 对上房间号）；② 斗鱼——旧的 /api/search/api/searchRoom 被机器人验证页挡，改走 /japi/search/api/searchShow（房间）和 /japi/search/api/searchUser（主播，filterType=1），“主播”页现在真的按人搜；③ 快手——搜索以前写死返回空，改走 live_api/search/author，主播页由房间结果映射。三个接口都在服务器上实测过（搜 DANK1NG 出 10188 号房、搜“英雄联盟”出房间、搜“旭旭宝宝”出 5 个主播）。抖音没动：参照里也没有按人名搜抖音的接口（匿名视频搜索回 2483，分区兜底只匹配分类名），Bilibili 也没动：参照同样丢掉没有房间号的用户。
 
 - **0.1.0 build 19（2026-11-28）：** ① 全屏退出黑屏修了：内联和全屏共用一个视频容器，全屏一关容器就没了父视图，画面黑掉——现在每个挂载点用自己的容器壳，进出全屏重新挂接；② 抖音看不了修了：抖音房间走 web_rid 时取流用的是 enter 接口的地址，实测那条地址在手机上打不开——现在有内部房间号时改取 reflow 接口的流（同一房间实测 FLV/HLS 都通，15 万人在线）；③ 斗鱼弹幕修了：旧的 TCP 弹幕服务器（openbarrage:8601）已经死了，登录就被踢——改走 Pure Live 的 WebSocket 弹幕（danmuproxy.douyu.com:8506，心跳改 mrkl）；④ 工具箱修了：粘贴抖音分享文案能直接打开（从文案里抽链接、跟短链跳转到 reflow 地址），复制直链也一样走这条解析；⑤ 分区和热门的站点换成各站自己的 logo（34 个站的原版图标打进包里，热门 chips 和分区分栏都显示）；⑥ 关于页做成 Music 那种：大图标+版本/构建号/开发者+更新检查+ GitHub 链接+免责声明，Pure Live 致谢链接改成 wzgrx 的仓库；⑦ 显示数据加了开关（设置 → 播放器 → 显示数据），关掉就不显示画面上的诊断 tag。
 

@@ -169,25 +169,93 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
 
     // MARK: - Search
 
+    /// Douyu's search (Pure Live's japi search, douyu_site.dart:204-231):
+    /// rooms come from `/japi/search/api/searchShow`, anchors from
+    /// `/japi/search/api/searchUser` (filterType=1), both with the
+    /// search-page Referer. Verified live 2026-11-28: searchShow returns
+    /// data.relateShow[] for "英雄联盟", searchUser returns
+    /// data.relateUser[].anchorInfo[] for "旭旭宝宝". The old
+    /// /api/search/api/searchRoom endpoint answered a bot page from this
+    /// VM and was shared by both tabs, so the 主播 tab never searched
+    /// people at all.
+    private static let searchReferer = "https://www.douyu.com/search/"
+
     func searchRooms(keyword: String) async throws -> [LiveRoom] {
-        try await search(keyword: keyword)
+        try await searchRooms(keyword: keyword, page: 1)
     }
 
     func searchAnchors(keyword: String) async throws -> [LiveRoom] {
-        try await search(keyword: keyword)
+        try await searchAnchors(keyword: keyword, page: 1)
     }
 
-    /// Douyu's web search API. The endpoint answers from a real
-    /// browser; from this VM it returns a "提示信息" bot page, so the
-    /// response shape is parsed defensively and the call is marked
-    /// unverified until a device confirms it.
-    private func search(keyword: String) async throws -> [LiveRoom] {
-        let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
-        let url = "\(Self.webBase)/api/search/api/searchRoom?kw=\(encoded)"
-        let data = try await http.get(url, headers: ["Referer": "\(Self.webBase)/"])
-        guard let json = JSONValue.parse(data) else { throw LiveSiteError.invalidResponse }
-        let list = json["data"]["list"].arrayValue
-        return list.map(Self.room(fromListItem:))
+    func searchRooms(keyword: String, page: Int) async throws -> [LiveRoom] {
+        let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, page >= 1 else { return [] }
+        let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmed
+        let url = "\(Self.webBase)/japi/search/api/searchShow?kw=\(encoded)&page=\(page)&pageSize=30"
+        let json = try await http.getJSON(url, headers: ["Referer": Self.searchReferer])
+        return json["data"]["relateShow"].arrayValue.compactMap(Self.room(fromSearchShowItem:))
+    }
+
+    func searchAnchors(keyword: String, page: Int) async throws -> [LiveRoom] {
+        let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, page >= 1 else { return [] }
+        let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmed
+        let url = "\(Self.webBase)/japi/search/api/searchUser?kw=\(encoded)&page=\(page)&pageSize=30&filterType=1"
+        let json = try await http.getJSON(url, headers: ["Referer": Self.searchReferer])
+        return json["data"]["relateUser"].arrayValue.compactMap { item in
+            Self.room(fromSearchUserItem: item["anchorInfo"])
+        }
+    }
+
+    /// Pure parser for one searchShow relateShow item. `hot` is the
+    /// platform's text ("353.9万"), parsed to a count. isLive 1 with
+    /// roomType 0 is live, roomType 3 a replay; anything else offline.
+    /// Testable without the network.
+    static func room(fromSearchShowItem item: JSONValue) -> LiveRoom? {
+        guard let id = item["rid"].stringValue, !id.isEmpty else { return nil }
+        let isLive = item["isLive"].intValue == 1 && (item["roomType"].intValue ?? 0) == 0
+        return LiveRoom(
+            id: "douyu-\(id)",
+            platform: .douyu,
+            roomID: id,
+            title: HaoText.stripTags(item["roomName"].stringValue ?? ""),
+            anchorName: HaoText.stripTags(item["nickName"].stringValue ?? ""),
+            anchorAvatarURL: Self.imageURL(item["avatar"].stringValue),
+            coverURL: Self.imageURL(item["roomSrc"].stringValue),
+            categoryName: item["cateName"].stringValue,
+            viewerCount: Self.viewerCount(fromHot: item["hot"]),
+            isLive: isLive
+        )
+    }
+
+    /// Pure parser for one searchUser relateUser.anchorInfo item.
+    /// Testable without the network.
+    static func room(fromSearchUserItem anchor: JSONValue) -> LiveRoom? {
+        guard let id = anchor["rid"].stringValue, !id.isEmpty else { return nil }
+        let nick = HaoText.stripTags(anchor["nickName"].stringValue ?? "")
+        return LiveRoom(
+            id: "douyu-\(id)",
+            platform: .douyu,
+            roomID: id,
+            title: nick,
+            anchorName: nick,
+            anchorAvatarURL: Self.imageURL(anchor["avatar"].stringValue),
+            coverURL: nil,
+            categoryName: nil,
+            viewerCount: 0,
+            isLive: anchor["isLive"].intValue == 1 && (anchor["roomType"].intValue ?? 0) == 0
+        )
+    }
+
+    /// The `hot` audience text ("353.9万", "1200", or a plain number)
+    /// as a count.
+    static func viewerCount(fromHot hot: JSONValue) -> Int {
+        if let n = hot.intValue { return n }
+        guard let s = hot.stringValue, !s.isEmpty else { return 0 }
+        if s.hasSuffix("万"), let v = Double(s.dropLast()) { return Int(v * 10_000) }
+        if s.hasSuffix("千"), let v = Double(s.dropLast()) { return Int(v * 1_000) }
+        return Int(s) ?? 0
     }
 
     // MARK: - Room detail
