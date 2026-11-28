@@ -91,6 +91,17 @@ import UIKit
     /// invisible next to the render path.
     nonisolated(unsafe) var hwdecCurrent: String = ""
 
+    /// mpv `demuxer-cache-duration` (seconds of stream buffered)
+    /// and `paused-for-cache` (playback stalled waiting for data).
+    /// Written from the event loop (nonisolated), read on the main
+    /// actor by the service's display name. Build 13's tag proved
+    /// GL + videotoolbox live while the room still lagged — so the
+    /// stall was never in render/decode, and the app was blind to
+    /// the one layer that could still starve: the feed. These two
+    /// values finally show it (userdata 4/5).
+    nonisolated(unsafe) var cacheDuration: Double = 0
+    nonisolated(unsafe) var pausedForCache: Bool = false
+
     /// A presented-frame stall marks the mpv engine unusable
     /// (canPlay false) so the sweep does not retry the same dead
     /// GPU path on the next candidate. The service recreates the
@@ -382,11 +393,12 @@ import UIKit
         // output driver; media_kit_video defaults vo to 'libmpv'
         // and sets it as a property). ao is left unset like wzgrx
         // (mpv's iOS default is audiounit). Everything else is
-        // exactly wzgrx's table — the old 3.x values (2 MiB probe,
-        // 30 s cache, 8 s readahead, 96 MB buffer, low-end lowres
-        // preset, framedrop) are gone: wzgrx measured first frame
-        // 1802 ms -> 708 ms with the 1 MiB / 1 s probe, and plays
-        // 原画 on these values.
+        // wzgrx's table except cache-secs / demuxer-max-bytes
+        // (build 14: 12 s / 64 MiB, see below) — the old 3.x values
+        // (2 MiB probe, 30 s cache, 8 s readahead, 96 MB buffer,
+        // low-end lowres preset, framedrop) are gone: wzgrx measured
+        // first frame 1802 ms -> 708 ms with the 1 MiB / 1 s probe,
+        // and plays 原画 on these values.
         setOption(handle, "vo", "libmpv") // iOS render API (see above)
         // hwdec follows the setting (Pure Live's hwdec setting:
         // auto / auto-safe / no; wzgrx default auto-safe).
@@ -406,8 +418,15 @@ import UIKit
         setOption(handle, "network-timeout", "15")
         setOption(handle, "cache", "yes")
         setOption(handle, "cache-on-disk", "no")
-        setOption(handle, "cache-secs", "6")
-        setOption(handle, "demuxer-max-bytes", "33554432")
+        // Build 14 deliberate deviation from wzgrx's table (6 s /
+        // 32 MiB): at 蓝光 30M a 6 s cache is 22.5 MB and drains in
+        // seconds on any throughput dip, so a high-bitrate room
+        // stalls on the feed, not on render or decode (build 13's
+        // tag proved both live). 12 s / 64 MiB still keeps live
+        // latency modest; the tag now shows the real buffered
+        // seconds, so the depth is visible, not guessed.
+        setOption(handle, "cache-secs", "12")
+        setOption(handle, "demuxer-max-bytes", "67108864")
         setOption(handle, "demuxer-max-back-bytes", "4194304")
         setOption(handle, "demuxer-donate-buffer", "no")
         setOption(handle, "demuxer-readahead-secs", "2")
@@ -506,6 +525,16 @@ import UIKit
         }
         "hwdec-current".withCString { name in
             _ = mpv_observe_property(handle, 3, name, MPV_FORMAT_STRING)
+        }
+        // Buffer state (build 14): demuxer-cache-duration (seconds
+        // buffered, userdata 4) and paused-for-cache (stalled for
+        // data, userdata 5). The tag shows both, so a feed stall
+        // finally reads as one instead of looking like a render lag.
+        "demuxer-cache-duration".withCString { name in
+            _ = mpv_observe_property(handle, 4, name, MPV_FORMAT_DOUBLE)
+        }
+        "paused-for-cache".withCString { name in
+            _ = mpv_observe_property(handle, 5, name, MPV_FORMAT_FLAG)
         }
     }
 
@@ -696,6 +725,14 @@ import UIKit
         }
     }
 
+    /// Cache state changed (whole-second bucket or stall flip):
+    /// tell the service so the on-screen tag refreshes. Hops to
+    /// the main actor like the other delegate calls from this
+    /// thread (see the error path below).
+    nonisolated private func notifyCacheStateChanged() {
+        Task { @MainActor in self.delegate?.engineCacheStateDidChange(self) }
+    }
+
     /// nonisolated (called from the event loop): renderSize is
     /// nonisolated(unsafe) — written here, read by the render thread
     /// — so it is updated directly, no hop.
@@ -709,6 +746,27 @@ import UIKit
             guard property.format == MPV_FORMAT_STRING, let valuePtr = property.data,
                   let cString = valuePtr.assumingMemoryBound(to: UnsafePointer<CChar>?.self).pointee else { return }
             hwdecCurrent = String(cString: cString)
+            return
+        }
+        // demuxer-cache-duration (userdata 4) is a double: seconds
+        // of stream buffered. Notify only when the whole-second
+        // bucket changes — the value itself moves constantly.
+        if event.reply_userdata == 4 {
+            guard property.format == MPV_FORMAT_DOUBLE, let valuePtr = property.data else { return }
+            let value = valuePtr.assumingMemoryBound(to: Double.self).pointee
+            let oldSeconds = Int(cacheDuration)
+            cacheDuration = max(0, value)
+            if Int(cacheDuration) != oldSeconds { notifyCacheStateChanged() }
+            return
+        }
+        // paused-for-cache (userdata 5) is a flag (int 0/1): mpv
+        // has paused playback waiting for data. Notify on flip.
+        if event.reply_userdata == 5 {
+            guard property.format == MPV_FORMAT_FLAG, let valuePtr = property.data else { return }
+            let value = valuePtr.assumingMemoryBound(to: Int.self).pointee != 0
+            guard value != pausedForCache else { return }
+            pausedForCache = value
+            notifyCacheStateChanged()
             return
         }
         guard property.format == MPV_FORMAT_INT64, let valuePtr = property.data else { return }

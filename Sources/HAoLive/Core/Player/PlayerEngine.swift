@@ -72,4 +72,8 @@ import UIKit
 
     /// First video frame rendered (watchdog progress signal).
     func engineDidRenderFirstFrame(_ engine: any PlayerEngine)
+
+    /// Cache state changed (buffered seconds or stall flip): the
+    /// service refreshes the on-screen tag.
+    func engineCacheStateDidChange(_ engine: any PlayerEngine)
 }

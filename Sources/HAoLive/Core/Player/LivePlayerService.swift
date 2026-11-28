@@ -553,8 +553,25 @@ final class LivePlayerService: ObservableObject {
             // software decode. Empty until the first property event
             // arrives — engineDidBecomeReady refreshes the name then.
             let decode = mpv.hwdecCurrent
-            guard !decode.isEmpty else { return base }
-            return decode == "no" ? "\(base) · 软解" : "\(base) · \(decode)"
+            let decoded: String
+            if decode.isEmpty {
+                decoded = base
+            } else if decode == "no" {
+                decoded = "\(base) · 软解"
+            } else {
+                decoded = "\(base) · \(decode)"
+            }
+            // Buffer state (build 14): a stall for data must read
+            // as one on the pill — it leads the string so the 140pt
+            // pill shows it even truncated; otherwise the buffered
+            // seconds ride at the end (the full text is in the
+            // header ••• menu).
+            if mpv.pausedForCache {
+                return "等缓冲 · \(decoded)"
+            }
+            let seconds = Int(mpv.cacheDuration)
+            guard seconds > 0 else { return decoded }
+            return "\(decoded) · 缓\(seconds)s"
         }
         #endif
         return engine.name
@@ -682,5 +699,12 @@ extension LivePlayerService: PlayerEngineDelegate {
     func engineDidRenderFirstFrame(_ engine: any PlayerEngine) {
         // mpv reports ready on the first frame itself; the watchdog
         // is cancelled there. Nothing extra to do here.
+    }
+
+    func engineCacheStateDidChange(_ engine: any PlayerEngine) {
+        // Live tag refresh (build 14): only the active engine's
+        // buffer state shows; stale engines never rewrite the pill.
+        guard engine === activeEngine else { return }
+        engineName = displayName(for: engine)
     }
 }
