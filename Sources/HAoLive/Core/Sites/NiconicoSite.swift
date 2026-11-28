@@ -300,19 +300,13 @@ final class NiconicoSite: LiveSite, @unchecked Sendable {
     /// opened it; a later `stream` replaces the grant, and the
     /// seat's end revokes it).
     private func heldSession(for watch: NiconicoWatch) async throws -> NiconicoSession {
-        let existing: NiconicoSession? = {
-            sessionLock.lock()
-            defer { sessionLock.unlock() }
-            return heldSession
-        }()
+        let existing: NiconicoSession? = sessionLock.withLock { heldSession }
         if let existing, existing.programID == watch.programID, existing.isAlive {
             return existing
         }
         existing?.close()
         let fresh = try await NiconicoSession.open(watch: watch)
-        sessionLock.lock()
-        heldSession = fresh
-        sessionLock.unlock()
+        sessionLock.withLock { heldSession = fresh }
         return fresh
     }
 #endif

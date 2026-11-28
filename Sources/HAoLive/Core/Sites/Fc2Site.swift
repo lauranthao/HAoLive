@@ -217,20 +217,14 @@ final class Fc2Site: LiveSite, @unchecked Sendable {
     /// control — the old one is closed first (ref: a control
     /// never reconnects with a used grant).
     private func heldControl(for channelID: String) async throws -> Fc2ControlSession.Fc2Control {
-        let existing: Fc2ControlSession.Fc2Control? = {
-            controlLock.lock()
-            defer { controlLock.unlock() }
-            return heldControl
-        }()
+        let existing: Fc2ControlSession.Fc2Control? = controlLock.withLock { heldControl }
         if let existing, existing.channelID == channelID, existing.isAlive {
             return existing
         }
         existing?.close()
         let grant = try await Fc2ControlSession.controlGrant(channelID: channelID, http: http)
         let fresh = try await Fc2ControlSession.Fc2Control.open(grant: grant)
-        controlLock.lock()
-        heldControl = fresh
-        controlLock.unlock()
+        controlLock.withLock { heldControl = fresh }
         return fresh
     }
 #endif
