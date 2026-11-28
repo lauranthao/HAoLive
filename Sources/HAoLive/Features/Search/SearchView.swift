@@ -55,8 +55,7 @@ struct SearchView: View {
     /// Generation counter: a slow earlier search must never
     /// overwrite a newer one's results.
     @State private var searchGeneration = 0
-
-    @Environment(\.dismiss) private var dismiss
+    @StateObject private var history = SearchHistoryStore.shared
 
     private enum SearchKind: String, CaseIterable {
         case rooms = "房间"
@@ -81,24 +80,49 @@ struct SearchView: View {
             } else if didSearch {
                 resultsList
             } else {
-                ContentUnavailableView(
-                    "跨平台搜索",
-                    systemImage: "magnifyingglass",
-                    description: Text("一次搜遍哔哩哔哩、斗鱼、虎牙、抖音、快手")
-                )
-                .padding(.top, 40)
+                VStack(spacing: 16) {
+                    ContentUnavailableView(
+                        "跨平台搜索",
+                        systemImage: "magnifyingglass",
+                        description: Text("一次搜遍哔哩哔哩、斗鱼、虎牙、抖音、快手")
+                    )
+                    .padding(.top, HaoLiveDesign.emptyStateTopPadding)
+                    // Search history (HAoMusic: up to 10 keywords,
+                    // chips + clear; tapping one searches it).
+                    if !history.keywords.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("搜索记录")
+                                    .font(.subheadline.bold())
+                                Spacer()
+                                Button("清除") { history.clear() }
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    ForEach(history.keywords, id: \.self) { word in
+                                        Button(word) {
+                                            keyword = word
+                                            Task { await search(reset: true) }
+                                        }
+                                        .font(.subheadline.weight(.semibold))
+                                        .padding(.horizontal, HaoLiveDesign.chipHorizontalPadding)
+                                        .padding(.vertical, HaoLiveDesign.chipVerticalPadding)
+                                        .buttonStyle(.chip(isSelected: false))
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, HaoLiveDesign.pagePadding)
+                    }
+                }
             }
             Spacer()
         }
         .navigationTitle("搜索")
-        .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(for: LiveRoom.self) { room in
             LiveRoomView(room: room)
-        }
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("取消") { dismiss() }
-            }
         }
     }
 
@@ -111,11 +135,14 @@ struct SearchView: View {
             TextField("搜房间、搜主播", text: $keyword)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .onSubmit { Task { await search(reset: true) } }
+                .onSubmit {
+                    history.record(keyword)
+                    Task { await search(reset: true) }
+                }
                 .onChange(of: keyword) { _, newValue in
-                    // 300ms debounce: type, pause, then search.
+                    // 400ms debounce (HAoMusic): type, pause, then search.
                     Task {
-                        try? await Task.sleep(for: .milliseconds(300))
+                        try? await Task.sleep(for: .milliseconds(400))
                         guard newValue == keyword, !newValue.isEmpty else { return }
                         await search(reset: true)
                     }
@@ -132,7 +159,7 @@ struct SearchView: View {
             }
         }
         .padding(10)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: HaoLiveDesign.controlCornerRadius))
         .padding(.horizontal, HaoLiveDesign.pagePadding)
         .padding(.top, 4)
     }
@@ -172,10 +199,8 @@ struct SearchView: View {
                 .font(.subheadline.weight(.semibold))
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .background(selected ? HaoLiveDesign.liveRed : Color(.secondarySystemBackground), in: Capsule())
-                .foregroundStyle(selected ? .white : .primary)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.chip(isSelected: selected))
     }
 
     private var sortRow: some View {
@@ -199,7 +224,7 @@ struct SearchView: View {
     private var emptyState: some View {
         VStack(spacing: 16) {
             ContentUnavailableView.search(text: keyword)
-                .padding(.top, 40)
+                .padding(.top, HaoLiveDesign.emptyStateTopPadding)
             if searchFailed {
                 Text("各平台搜索都失败了，检查网络后重试")
                     .font(.subheadline)
@@ -249,9 +274,15 @@ struct SearchView: View {
         .listStyle(.plain)
     }
 
-    /// The selected platform's own web search page (all five URLs
-    /// verified live 2026-11-27). Kuaishou has no native search,
-    /// so this is its only search fallback.
+    /// The selected platform's own web search page (the five
+    /// original URLs verified live 2026-11-27). Kuaishou has no
+    /// native search, so this is its only search fallback.
+    /// Build 11: only platforms whose web search page is known
+    /// for certain are listed (Twitch / AcFun / Xiaohongshu /
+    /// Weibo / TikTok / YouTube / Kick); the rest return nil and
+    /// the fallback link stays hidden — a wrong search URL is
+    /// worse than none, and the app's own API search is the
+    /// primary path for those platforms anyway.
     private var webSearchURL: URL? {
         let encoded = keyword.trimmingCharacters(in: .whitespaces)
             .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword
@@ -266,6 +297,22 @@ struct SearchView: View {
             return URL(string: "https://www.douyin.com/search/\(encoded)")
         case .kuaishou:
             return URL(string: "https://www.kuaishou.com/search/video?searchKey=\(encoded)")
+        case .twitch:
+            return URL(string: "https://www.twitch.tv/search?term=\(encoded)")
+        case .acfun:
+            return URL(string: "https://www.acfun.cn/search/?keyword=\(encoded)")
+        case .xiaohongshu:
+            return URL(string: "https://www.xiaohongshu.com/search_result?keyword=\(encoded)")
+        case .weibo:
+            return URL(string: "https://s.weibo.com/weibo?q=\(encoded)")
+        case .tiktok:
+            return URL(string: "https://www.tiktok.com/search?q=\(encoded)")
+        case .youtube:
+            return URL(string: "https://www.youtube.com/results?search_query=\(encoded)")
+        case .kick:
+            return URL(string: "https://kick.com/search?query=\(encoded)")
+        default:
+            return nil
         }
     }
 

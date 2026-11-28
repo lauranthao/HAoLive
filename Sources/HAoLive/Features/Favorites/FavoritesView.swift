@@ -83,7 +83,7 @@ struct FavoritesView: View {
                     systemImage: "heart",
                     description: Text("在直播间点收藏，房间会出现在这里")
                 )
-                .padding(.top, 80)
+                .padding(.top, HaoLiveDesign.emptyStateTopPadding)
             } else {
                 statusTabs
                 platformRail
@@ -103,11 +103,12 @@ struct FavoritesView: View {
                         NavigationLink(value: entry.room) {
                             RoomCard(room: entry.room)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.interactiveCard)
                         .contextMenu {
                             Button("编辑标签") { tagEditingRoom = entry.room }
                             Button("取消收藏", role: .destructive) {
                                 favoritesStore.remove(entry.room)
+                                ToastCenter.shared.show("已取消收藏")
                             }
                         }
                     }
@@ -120,7 +121,7 @@ struct FavoritesView: View {
                 }
                 if filteredEntries.isEmpty {
                     ContentUnavailableView("没有符合条件的收藏", systemImage: "heart.slash")
-                        .padding(.top, 40)
+                        .padding(.top, HaoLiveDesign.emptyStateTopPadding)
                 }
             }
         }
@@ -160,10 +161,8 @@ struct FavoritesView: View {
                 .font(.subheadline.weight(.semibold))
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .background(selected ? HaoLiveDesign.liveRed : Color(.secondarySystemBackground), in: Capsule())
-                .foregroundStyle(selected ? .white : .primary)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.chip(isSelected: selected))
     }
 
     private var platformRail: some View {
@@ -186,13 +185,11 @@ struct FavoritesView: View {
     private func chip(title: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.subheadline)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(selected ? Color(hex: "#3A3A3C").opacity(0.5) : Color(.secondarySystemBackground), in: Capsule())
-                .foregroundStyle(selected ? .primary : .secondary)
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, HaoLiveDesign.chipHorizontalPadding)
+                .padding(.vertical, HaoLiveDesign.chipVerticalPadding)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.chip(isSelected: selected))
     }
 
     private var tagRow: some View {

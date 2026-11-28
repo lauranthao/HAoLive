@@ -34,7 +34,7 @@
 //   keys could be verified from this VM; needs a device):
 //     modern: web_stream_url.live_core_sdk_data.pull_data.stream_data
 //       (a JSON string; data: {qualityKey: {main: {flv, hls}}})
-//     legacy: web_stream_url.hls_pull_url_map and .hls_pull_url
+//     legacy: web_stream_url.flv_pull_url / .hls_pull_url_map
 //       (qualityKey -> URL string or {url_list: [...]})
 //   Quality keys are joined by key, never by position; "ao" is
 //   audio-only and is skipped. Per quality the URLs keep Pure
@@ -64,6 +64,28 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
     private static let qualityNames: [String: String] = [
         "FULL_HD1": "原画", "HD1": "超清", "SD1": "高清", "SD2": "标清",
     ]
+
+    /// Room info cache (Pure Live parses the stream from the ROOM
+    /// object the controller already fetched — roomInfo is not
+    /// re-fetched for every playURLs call). roomDetail stores it,
+    /// playURLs reuses it for 60 s; the stream URLs inside are
+    /// short-lived, so the TTL stays short.
+    private static let roomInfoCacheLock = NSLock()
+    nonisolated(unsafe) private static var roomInfoCache: [String: (info: JSONValue, at: Date)] = [:]
+
+    private static func cachedRoomInfo(for roomID: String) -> JSONValue? {
+        roomInfoCacheLock.lock()
+        defer { roomInfoCacheLock.unlock() }
+        guard let entry = roomInfoCache[roomID],
+              Date().timeIntervalSince(entry.at) < 60 else { return nil }
+        return entry.info
+    }
+
+    private static func storeRoomInfo(_ info: JSONValue, for roomID: String) {
+        roomInfoCacheLock.lock()
+        defer { roomInfoCacheLock.unlock() }
+        roomInfoCache[roomID] = (info, Date())
+    }
 
     // MARK: - Lists
 
@@ -310,8 +332,8 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
                 roomID: roomID,
                 title: item["desc"].stringValue ?? "",
                 anchorName: author["nickname"].stringValue ?? "",
-                anchorAvatarURL: URL(string: author["avatar_thumb"]["url_list"][0].stringValue ?? ""),
-                coverURL: URL(string: item["video"]["cover"]["url_list"][0].stringValue ?? ""),
+                anchorAvatarURL: Self.imageURL(author["avatar_thumb"]["url_list"][0].stringValue),
+                coverURL: Self.imageURL(item["video"]["cover"]["url_list"][0].stringValue),
                 categoryName: nil,
                 viewerCount: 0,
                 isLive: true
@@ -374,6 +396,8 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
             }
         }
         // Legacy maps: qualityKey -> URL string or {url_list: [...]}.
+        // Pure Live reads flv_pull_url + hls_pull_url_map only —
+        // there is no "hls_pull_url" key in its parser.
         var legacyFLV: [String: String] = [:]
         var legacyHLS: [String: String] = [:]
         for key in ["flv_pull_url"] {
@@ -384,7 +408,7 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
                 }
             }
         }
-        for mapKey in ["hls_pull_url_map", "hls_pull_url"] {
+        for mapKey in ["hls_pull_url_map"] {
             for (key, value) in streamURL[mapKey].objectValue {
                 let urlString = value.stringValue ?? value["url_list"][0].stringValue
                 if let urlString, !urlString.isEmpty {
@@ -435,7 +459,14 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
             }
         }
         // Higher rank first (原画 > 超清 > 高清 > 标清), then the rest.
-        keys.sort { rank(of: $0) > rank(of: $1) }
+        // Equal ranks tie-break by key name: the key list is built
+        // partly from dictionary keys, whose order is not stable —
+        // without this, two equal-rank tiers could swap buttons
+        // between loads.
+        keys.sort {
+            let a = rank(of: $0), b = rank(of: $1)
+            return a != b ? a > b : $0 < $1
+        }
         var streams: [PlayStream] = []
         var emittedURLs: Set<String> = []
         for key in keys {
@@ -505,30 +536,34 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
     /// web_rid (enter API, then HTML), longer is the 19-digit
     /// internal id (reflow/info API).
     private func roomInfo(for roomID: String) async throws -> JSONValue {
+        if let cached = Self.cachedRoomInfo(for: roomID) { return cached }
+        let info: JSONValue
         if roomID.count > 16 {
             // 19-digit internal id (the ids feed/category return):
             // reflow/info — Pure Live's ByRoomId route. The room
             // page cannot serve these ids.
-            return try await roomInfoFromReflow(roomID: roomID)
+            info = try await roomInfoFromReflow(roomID: roomID)
+        } else if let entered = try? await roomInfoFromEnter(webRID: roomID) {
+            // Short web_rid: signed enter API first (Pure Live's
+            // primary ByWebRid route), the hydrated room page as
+            // fallback. The page fetch MUST carry the browser headers
+            // (build 9 sent none — the page came back 200 with an
+            // empty body).
+            info = entered
+        } else {
+            let headers = await Self.requestHeaders()
+            let html = try await pageHTML(path: roomID, headers: headers)
+            let stores = HaoText.extractAllEscapedJSONObjects(html, marker: "roomStore").compactMap { text -> JSONValue? in
+                guard let data = text.data(using: .utf8) else { return nil }
+                return JSONValue.parse(data)
+            }
+            guard let roomInfo = Self.roomInfo(fromRoomStores: stores) else {
+                throw LiveSiteError.roomNotFound(roomID)
+            }
+            info = roomInfo
         }
-        // Short web_rid: signed enter API first (Pure Live's
-        // primary ByWebRid route), the hydrated room page as
-        // fallback. The page fetch MUST carry the browser headers
-        // (build 9 sent none — the page came back 200 with an
-        // empty body).
-        if let entered = try? await roomInfoFromEnter(webRID: roomID) {
-            return entered
-        }
-        let headers = await Self.requestHeaders()
-        let html = try await pageHTML(path: roomID, headers: headers)
-        let stores = HaoText.extractAllEscapedJSONObjects(html, marker: "roomStore").compactMap { text -> JSONValue? in
-            guard let data = text.data(using: .utf8) else { return nil }
-            return JSONValue.parse(data)
-        }
-        guard let roomInfo = Self.roomInfo(fromRoomStores: stores) else {
-            throw LiveSiteError.roomNotFound(roomID)
-        }
-        return roomInfo
+        Self.storeRoomInfo(info, for: roomID)
+        return info
     }
 
     /// reflow/info — Pure Live's ByRoomId route
@@ -616,8 +651,8 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
             roomID: webRID,
             title: room["title"].stringValue ?? "",
             anchorName: anchor["nickname"].stringValue ?? "",
-            anchorAvatarURL: URL(string: anchor["avatar_thumb"]["url_list"][0].stringValue ?? ""),
-            coverURL: nil,
+            anchorAvatarURL: Self.imageURL(anchor["avatar_thumb"]["url_list"][0].stringValue),
+            coverURL: Self.imageURL(firstImageURL([room["cover"]])),
             categoryName: nil,
             viewerCount: Int(room["user_count_str"].stringValue ?? "") ?? room["user_count"].intValue ?? 0,
             isLive: room["status"].intValue == 2
@@ -656,8 +691,8 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
                 roomID: roomID,
                 title: title,
                 anchorName: nick,
-                anchorAvatarURL: URL(string: avatar),
-                coverURL: URL(string: cover),
+                anchorAvatarURL: Self.imageURL(avatar),
+                coverURL: Self.imageURL(cover),
                 categoryName: area.isEmpty ? nil : area,
                 viewerCount: onlineViewers(room),
                 isLive: true
@@ -682,8 +717,8 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
             roomID: roomID,
             title: room["title"].stringValue ?? "",
             anchorName: owner["nickname"].stringValue ?? "",
-            anchorAvatarURL: URL(string: owner["avatar_thumb"]["url_list"][0].stringValue ?? ""),
-            coverURL: URL(string: room["cover"]["url_list"][0].stringValue ?? ""),
+            anchorAvatarURL: Self.imageURL(owner["avatar_thumb"]["url_list"][0].stringValue),
+            coverURL: Self.imageURL(room["cover"]["url_list"][0].stringValue),
             categoryName: (tag ?? "").isEmpty ? nil : tag,
             viewerCount: onlineViewers(room),
             isLive: true

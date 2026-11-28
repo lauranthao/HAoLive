@@ -66,7 +66,7 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
         data.arrayValue.compactMap { item in
             guard let id = item["gid"].stringValue,
                   let name = item["gameFullName"].stringValue, !name.isEmpty else { return nil }
-            return LiveCategory(id: "huya-\(id)", platform: .huya, name: name, iconName: nil, iconURL: URL(string: item["imgUrl"].stringValue ?? ""))
+            return LiveCategory(id: "huya-\(id)", platform: .huya, name: name, iconName: nil, iconURL: Self.imageURL(item["imgUrl"].stringValue))
         }
     }
 
@@ -149,8 +149,8 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
             roomID: id,
             title: roomData["introduction"].stringValue ?? "",
             anchorName: profile?["nick"].stringValue ?? "",
-            anchorAvatarURL: URL(string: profile?["avatar"].stringValue ?? ""),
-            coverURL: Self.httpURL(roomData["screenshot"].stringValue),
+            anchorAvatarURL: Self.imageURL(profile?["avatar"].stringValue),
+            coverURL: Self.imageURL(roomData["screenshot"].stringValue),
             categoryName: roomData["gameFullName"].stringValue,
             viewerCount: roomData["totalCount"].intValue ?? 0,
             isLive: roomData["state"].stringValue == "ON" || roomData["isOn"].boolValue == true
@@ -217,11 +217,14 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
             }
         }
         guard !lines.isEmpty else { return [] }
-        // Qualities: vMultiStreamInfo, HDR skipped; source (0) first.
+        // Qualities: vMultiStreamInfo, HDR and 4K skipped (Pure
+        // Live excludes 4K tiers); source (0) first, then bitRate
+        // descending.
         var rates: [(name: String, bitRate: Int)] = []
         for item in stream["vMultiStreamInfo"].arrayValue {
             guard let name = item["sDisplayName"].stringValue, !name.isEmpty,
                   !name.contains("HDR"),
+                  !name.contains("4K"),
                   let rate = item["iBitRate"].intValue else { continue }
             if !rates.contains(where: { $0.bitRate == rate }) {
                 rates.append((name: name, bitRate: rate))
@@ -235,6 +238,13 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
             return a.bitRate > b.bitRate
         }
         var streams: [PlayStream] = []
+        // The web-template URL's lease (Pure Live's
+        // _transportInvalidAge = 125 s, refresh at 100 s): the
+        // service refreshes before it dies. The native WUP token
+        // (getNativeCdnTokenInfoEx) is NOT ported in this leg —
+        // Pure Live keeps this web-template path as its fallback,
+        // and the lease above keeps it renewing.
+        let issuedAt = Date()
         for rate in rates {
             for line in lines {
                 guard let urlString = Self.playURL(line: line, bitRate: rate.bitRate, viewerUID: viewerUID),
@@ -243,7 +253,8 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
                     url: url,
                     quality: rate.name,
                     line: Self.cdnNames[line.cdnType] ?? (line.cdnType.isEmpty ? "主线路" : line.cdnType),
-                    headers: headers
+                    headers: headers,
+                    expiresAt: issuedAt.addingTimeInterval(125)
                 ))
             }
         }
@@ -544,17 +555,12 @@ final class HuyaSite: LiveSite, @unchecked Sendable {
             roomID: roomID,
             title: HaoText.firstNonEmpty(item["introduction"].stringValue, item["roomName"].stringValue) ?? "",
             anchorName: item["nick"].stringValue ?? "",
-            anchorAvatarURL: httpURL(item["avatar180"].stringValue),
-            coverURL: httpURL(item["screenshot"].stringValue),
+            anchorAvatarURL: Self.imageURL(item["avatar180"].stringValue),
+            coverURL: Self.imageURL(item["screenshot"].stringValue),
             categoryName: item["gameFullName"].stringValue,
             viewerCount: item["totalCount"].intValue ?? 0,
             isLive: true
         )
     }
 
-    private static func httpURL(_ string: String?) -> URL? {
-        guard var s = string, !s.isEmpty else { return nil }
-        if s.hasPrefix("//") { s = "https:" + s }
-        return URL(string: s)
-    }
 }

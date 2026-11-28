@@ -30,10 +30,24 @@ final class SettingsStore: ObservableObject {
     @Published var theme: HaoLiveTheme = .system {
         didSet { save() }
     }
-    @Published var preferredQuality: String = "" {
+    /// Preferred quality on Wi-Fi (Pure Live's preferResolution;
+    /// wzgrx default 原画, same as cellular).
+    @Published var preferredQuality: String = "原画" {
+        didSet { save() }
+    }
+    /// Preferred quality on cellular (Pure Live's
+    /// preferResolutionCellular; wzgrx default 原画).
+    @Published var preferredQualityCellular: String = "原画" {
         didSet { save() }
     }
     @Published var preferredLine: String = "" {
+        didSet { save() }
+    }
+    /// mpv hardware decoding (Pure Live's hwdec setting):
+    /// auto / auto-safe / no. wzgrx default is auto-safe
+    /// (hardwareDecoding on -> preferredHardwareDecoder).
+    /// Applied when the engine is created.
+    @Published var hwdecMode: String = "auto-safe" {
         didSet { save() }
     }
 
@@ -91,8 +105,10 @@ final class SettingsStore: ObservableObject {
 
     private struct Saved: Codable {
         var theme: HaoLiveTheme = .system
-        var preferredQuality: String = ""
+        var preferredQuality: String = "原画"
+        var preferredQualityCellular: String = "原画"
         var preferredLine: String = ""
+        var hwdecMode: String = "auto-safe"
         var danmakuEnabled: Bool = true
         var danmakuFontSize: Double = 14
         var danmakuOpacity: Double = 0.9
@@ -128,8 +144,14 @@ final class SettingsStore: ObservableObject {
         guard let data = UserDefaults.standard.data(forKey: key),
               let decoded = try? JSONDecoder().decode(Saved.self, from: data) else { return }
         theme = decoded.theme
-        preferredQuality = decoded.preferredQuality
+        // Build 11: the old "" default ("automatic") is replaced by
+        // wzgrx's 原画 default; an empty saved value means the user
+        // never chose, so it migrates to 原画. An explicit "auto"
+        // hwdec migrates to wzgrx's auto-safe default the same way.
+        preferredQuality = decoded.preferredQuality.isEmpty ? "原画" : decoded.preferredQuality
+        preferredQualityCellular = decoded.preferredQualityCellular.isEmpty ? "原画" : decoded.preferredQualityCellular
         preferredLine = decoded.preferredLine
+        hwdecMode = decoded.hwdecMode == "auto" ? "auto-safe" : decoded.hwdecMode
         danmakuEnabled = decoded.danmakuEnabled
         danmakuFontSize = decoded.danmakuFontSize
         danmakuOpacity = decoded.danmakuOpacity
@@ -150,7 +172,9 @@ final class SettingsStore: ObservableObject {
         let saved = Saved(
             theme: theme,
             preferredQuality: preferredQuality,
+            preferredQualityCellular: preferredQualityCellular,
             preferredLine: preferredLine,
+            hwdecMode: hwdecMode,
             danmakuEnabled: danmakuEnabled,
             danmakuFontSize: danmakuFontSize,
             danmakuOpacity: danmakuOpacity,

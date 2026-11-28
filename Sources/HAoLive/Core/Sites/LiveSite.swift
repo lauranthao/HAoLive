@@ -68,6 +68,21 @@ extension LiveSite {
         return try await recommendRooms()
     }
 
+    /// Image URLs (covers, avatars) normalized for the app:
+    /// `//` -> `https:`, `http://` -> `https://`. Plain http is
+    /// refused by ATS on device — Huya serves ~30% of its covers
+    /// over http, which is why a third of its cards stayed blank.
+    /// Stream URLs are NOT normalized — only images go through this.
+    static func imageURL(_ string: String?) -> URL? {
+        guard var s = string, !s.isEmpty else { return nil }
+        if s.hasPrefix("//") {
+            s = "https:" + s
+        } else if s.hasPrefix("http://") {
+            s = "https://" + s.dropFirst("http://".count)
+        }
+        return URL(string: s)
+    }
+
     func categoryRooms(_ category: LiveCategory, page: Int) async throws -> [LiveRoom] {
         guard page <= 1 else { return [] }
         return try await categoryRooms(category)

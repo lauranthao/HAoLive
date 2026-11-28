@@ -125,7 +125,7 @@ struct LiveRoomView: View {
                 danmakuMaxVisibleCount: settingsStore.danmakuMaxVisibleCount,
                 streams: streams,
                 isFavorite: favoritesStore.isFavorite(room),
-                onToggleFavorite: { favoritesStore.toggle(room) },
+                onToggleFavorite: { toggleFavorite() },
                 onToggleDanmaku: { settingsStore.danmakuEnabled.toggle() },
                 onOpenDanmakuSettings: { showingDanmakuSettings = true },
                 onSelectQuality: { stream in playerService.switchStream(stream) },
@@ -202,19 +202,26 @@ struct LiveRoomView: View {
             }
             Spacer()
             Button {
-                favoritesStore.toggle(room)
+                toggleFavorite()
             } label: {
                 Image(systemName: favoritesStore.isFavorite(room) ? "heart.fill" : "heart")
                     .foregroundStyle(favoritesStore.isFavorite(room) ? HaoLiveDesign.liveRed : .primary)
             }
+            .buttonStyle(.pressable)
             Menu {
                 if let url = roomWebURL {
                     Button("打开直播间") { UIApplication.shared.open(url) }
                     ShareLink(item: url, label: { Label("分享", systemImage: "square.and.arrow.up") })
-                    Button("复制直播间链接") { UIPasteboard.general.string = url.absoluteString }
+                    Button("复制直播间链接") {
+                        UIPasteboard.general.string = url.absoluteString
+                        ToastCenter.shared.show("已复制直播间链接")
+                    }
                 }
                 if let stream = playerService.currentStream {
-                    Button("复制播放地址") { UIPasteboard.general.string = stream.url.absoluteString }
+                    Button("复制播放地址") {
+                        UIPasteboard.general.string = stream.url.absoluteString
+                        ToastCenter.shared.show("已复制播放地址")
+                    }
                 }
                 Button {
                     showingSleepTimer = true
@@ -227,8 +234,10 @@ struct LiveRoomView: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundStyle(.primary)
-                    .padding(6)
+                    .frame(width: 36, height: 36)
+                    .background(Color(.secondarySystemBackground), in: Circle())
             }
+            .buttonStyle(.pressable)
         }
         .padding(.horizontal, HaoLiveDesign.pagePadding)
         .frame(height: 56)
@@ -258,8 +267,15 @@ struct LiveRoomView: View {
             // Placeholders (Pure Live's livePlayPlaceholderFor):
             // loading spins, a failed load shows the error + retry.
             if playerService.state == .loading {
-                ProgressView()
-                    .tint(.white)
+                VStack(spacing: 8) {
+                    ProgressView()
+                        .tint(.white)
+                    if let notice = playerService.notice {
+                        Text(notice)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.85))
+                    }
+                }
             }
             if let error = loadError {
                 RoomPlaceholder(icon: "exclamationmark.triangle", message: error) {
@@ -283,7 +299,7 @@ struct LiveRoomView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 8))
+                .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: HaoLiveDesign.hudCornerRadius))
             }
             // Top + bottom control bars (56 pt, gradient black45).
             if showControls && !locked {
@@ -299,7 +315,7 @@ struct LiveRoomView: View {
                     onBack: nil,
                     onToggleFullscreen: { isFullscreen = true },
                     onRefresh: { playerService.refresh() },
-                    onToggleFavorite: { favoritesStore.toggle(room) },
+                    onToggleFavorite: { toggleFavorite() },
                     onToggleDanmaku: { settingsStore.danmakuEnabled.toggle() },
                     onOpenDanmakuSettings: { showingDanmakuSettings = true },
                     onOpenQuality: { showingQualityPicker = true },
@@ -429,6 +445,7 @@ struct LiveRoomView: View {
                                         Button("屏蔽该用户", role: .destructive) {
                                             settingsStore.blockedUsers.append(item.user)
                                             danmakuEngine = makeDanmakuEngine()
+                                            ToastCenter.shared.show("已屏蔽该用户")
                                         }
                                     }
                                 }
@@ -590,13 +607,54 @@ struct LiveRoomView: View {
     }
 
     private var roomWebURL: URL? {
+        // Room page per platform, from Pure Live's *_link.dart
+        // watchUrl / url helpers. Inke has no watch page keyed
+        // by uid (its URL needs live_id, which the adapter does
+        // not expose on the room), so it returns nil and the
+        // "用浏览器打开" item stays hidden.
         switch room.platform {
         case .bilibili: URL(string: "https://live.bilibili.com/\(room.roomID)")
         case .douyu: URL(string: "https://www.douyu.com/\(room.roomID)")
         case .huya: URL(string: "https://www.huya.com/\(room.roomID)")
         case .douyin: URL(string: "https://live.douyin.com/\(room.roomID)")
         case .kuaishou: URL(string: "https://live.kuaishou.com/u/\(room.roomID)")
+        case .cc: URL(string: "https://cc.163.com/\(room.roomID)/")
+        case .twitch: URL(string: "https://www.twitch.tv/\(room.roomID)")
+        case .soop: URL(string: "https://play.sooplive.co.kr/\(room.roomID)")
+        case .yy: URL(string: "https://www.yy.com/\(room.roomID)")
+        case .acfun: URL(string: "https://live.acfun.cn/live/\(room.roomID)")
+        case .picarto: URL(string: "https://picarto.tv/\(room.roomID)")
+        case .twitcasting: URL(string: "https://twitcasting.tv/\(room.roomID)")
+        case .missevan: URL(string: "https://fm.missevan.com/live/\(room.roomID)")
+        case .inke: nil
+        case .kilakila: URL(string: "https://live.kilakila.cn/zhubo/\(room.roomID)")
+        case .xiaohongshu: URL(string: "https://www.xiaohongshu.com/livestream/\(room.roomID)")
+        case .niconico: URL(string: "https://live.nicovideo.jp/watch/\(room.roomID)")
+        case .weibo: URL(string: "https://weibo.com/l/wblive/p/show/\(room.roomID)")
+        case .showroom: URL(string: "https://www.showroom-live.com/room/profile?room_id=\(room.roomID)")
+        case .chzzk: URL(string: "https://chzzk.naver.com/live/\(room.roomID)")
+        case .liveme: URL(string: "https://www.liveme.com/livehot/streaming/\(room.roomID)")
+        case .tiktok: URL(string: "https://www.tiktok.com/@\(room.roomID)/live")
+        case .youtube: URL(string: "https://www.youtube.com/watch?v=\(room.roomID)")
+        case .bigo: URL(string: "https://www.bigo.tv/\(room.roomID)")
+        case .pandalive: URL(string: "https://www.pandalive.co.kr/live/play/\(room.roomID)")
+        case .fc2live: URL(string: "https://live.fc2.com/\(room.roomID)/")
+        case .steambroadcast: URL(string: "https://steamcommunity.com/broadcast/watch/\(room.roomID)")
+        case .jdlive: URL(string: "https://lives.jd.com/#/\(room.roomID)")
+        case .kugoulive: URL(string: "https://fanxing.kugou.com/\(room.roomID)")
+        case .baidulive: URL(string: "https://live.baidu.com/m/room/\(room.roomID)")
+        case .sixroom: URL(string: "https://v.6.cn/\(room.roomID)")
+        case .looklive: URL(string: "https://look.163.com/live?id=\(room.roomID)")
+        case .seventeenlive: URL(string: "https://17.live/en/live/\(room.roomID)")
+        case .kick: URL(string: "https://kick.com/\(room.roomID)")
         }
+    }
+
+    /// Favorite toggle with feedback (HAoMusic: every toggle toasts).
+    private func toggleFavorite() {
+        let nowFavorite = !favoritesStore.isFavorite(room)
+        favoritesStore.toggle(room)
+        ToastCenter.shared.show(nowFavorite ? "已收藏" : "已取消收藏")
     }
 
     private func localItem(text: String) -> DanmakuItem {
@@ -639,9 +697,17 @@ struct LiveRoomView: View {
         do {
             streams = try await site.playURLs(room: room)
             loadError = nil
+            // Pure Live applies a separate cellular default quality;
+            // the hwdec mode applies when the engine is created.
+            #if canImport(Libmpv)
+            MpvPlayerEngine.hwdecMode = settingsStore.hwdecMode
+            #endif
+            let preferredQuality = NetworkTypeMonitor.shared.isCellular
+                ? settingsStore.preferredQualityCellular
+                : settingsStore.preferredQuality
             playerService.open(
                 streams: streams,
-                preferredQuality: settingsStore.preferredQuality.isEmpty ? nil : settingsStore.preferredQuality,
+                preferredQuality: preferredQuality.isEmpty ? nil : preferredQuality,
                 preferredLine: settingsStore.preferredLine.isEmpty ? nil : settingsStore.preferredLine
             )
         } catch {
@@ -732,7 +798,7 @@ struct RoomPlaceholder: View {
         }
         .foregroundStyle(.white)
         .padding()
-        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: HaoLiveDesign.controlCornerRadius))
     }
 }
 
@@ -975,7 +1041,7 @@ struct PlayerChromeView: View {
                     BatteryView()
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, HaoLiveDesign.pagePadding)
             .frame(height: 56)
             .background(
                 LinearGradient(
@@ -1009,7 +1075,7 @@ struct PlayerChromeView: View {
                 chromeButton(systemName: videoFill ? "arrow.up.left.and.arrow.down.right" : "rectangle.expand.vertical") { onToggleFit() }
                 chromeButton(systemName: isFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") { onToggleFullscreen() }
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, HaoLiveDesign.pagePadding)
             .frame(height: 56)
             .background(
                 LinearGradient(
@@ -1029,6 +1095,7 @@ struct PlayerChromeView: View {
                 .foregroundStyle(.white)
                 .frame(width: 44, height: 44)
         }
+        .buttonStyle(.pressable)
     }
 }
 
@@ -1143,8 +1210,15 @@ struct FullscreenPlayerView: View {
                 )
             }
             if playerService.state == .loading {
-                ProgressView()
-                    .tint(.white)
+                VStack(spacing: 8) {
+                    ProgressView()
+                        .tint(.white)
+                    if let notice = playerService.notice {
+                        Text(notice)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.85))
+                    }
+                }
             }
             if case .failed(let message) = playerService.state {
                 RoomPlaceholder(icon: "exclamationmark.triangle", message: message) {
@@ -1163,7 +1237,7 @@ struct FullscreenPlayerView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 8))
+                .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: HaoLiveDesign.hudCornerRadius))
             }
             if showControls && !locked {
                 PlayerChromeView(

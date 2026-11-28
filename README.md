@@ -2,24 +2,33 @@
 
 HAo Live — 直播应用，参照 Pure Live 的**功能**，界面与实现均为 HAo 自己所写。
 
-- 参照：[Pure Live](https://github.com/liuchuancong/pure_live)（AGPL-3.0）
+- 参照：[Pure Live](https://github.com/wzgrx/PureLive)（AGPL-3.0；2026-11-28 起以 wzgrx 仓库为准，liuchuancong/pure_live 3.x 线作废）
 - 许可说明：只学习它的功能设计（平台适配、画质线路、弹幕、关注/历史/多画面），**不复制代码、不复制界面**。本仓库代码为 HAo 原创；若未来引用 Pure Live 代码，须按 AGPL-3.0 开源。
-- 平台：iOS 17+，Swift 6，SwiftUI，原生 AVPlayer（MPV/IJK 以后按需接入）
+- 平台：iOS 17+，Swift 6，SwiftUI，mpv 单一播放器（MPVKit 1.1.0-n9.0.2，FLV 走 mpv session 内拼接；无系统播放器兜底、无内核切换）
 - 无强制登录；收藏与历史只存本机
 - 无启动动画：进应用直接到主界面
+- 当前版本：0.1.0 build 11（2026-11-28）
+
+## 版本历史
+
+- **0.1.0 build 11（2026-11-28）：** 播放完全按 wzgrx/PureLive 对齐（删 HLS→系统播放器分流，AVPlayerEngine 删除，mpv 单引擎；FLV 租约拼接不断流；斗鱼按实际档位标画质、顺序请求；默认清晰度原画）；34 个平台全接进来（除 IPTV）；全 app 视觉对齐（unslop + impeccable 走查）；交互学 HAoMusic（Toast、搜索历史、按压态）；虎牙 http 封面升级 https、封面加载重试 + 磁盘缓存。
+- **0.1.0 build 10（2026-11-28）：** mpv GPU 渲染路径（OpenGL FBO 进显示层），抖音取流修复，斗鱼固定 did + 租约刷新。
+- **0.1.0 build 9 及更早：** 见 git 历史。
 
 ## v1 骨架（0.1.0）范围
 
-- 底栏四页签：收藏（关注房间网格）、热门（跨平台推荐）、分区（按平台+分类浏览）、录制中心（占位壳）
+- 底栏五页签：收藏（关注房间网格）、热门（跨平台推荐）、分区（按平台+分类浏览）、搜索、历史（录制已删，改为历史）
 - 直播间：竖屏进入、16:9 播放器、画质+线路切换、弹幕浮层+设置、收藏按钮、进房记历史
-- 跨平台搜索：一次搜遍五站，按平台顺序合并、按主播+标题去重
+- 跨平台搜索：一次搜遍多站，按平台顺序合并、按主播+标题去重
 - 本地收藏与观看历史（UserDefaults）
 - 设置：主题、播放器、弹幕、缓存、关于
-- 五站真实适配器已接通（见上节）
+- 34 站真实适配器已接通（见下节；IPTV 未加，是一条独立的腿）
 
-## 真实平台适配器（0.2.0）
+## 真实平台适配器（0.1.0 build 11）
 
-五站全部接通真实协议（匿名，无登录），STUB 已移除：
+34 站全部接通真实协议（匿名，无登录），顺序按 wzgrx 注册表：Bilibili、斗鱼、虎牙、抖音、快手、网易CC、Twitch、SOOP、YY、AcFun、Picarto、TwitCasting、Missevan、Inke、Kilakila、小红书（仅链接）、niconico、微博、SHOWROOM、CHZZK、Kick、LiveMe、TikTok（仅链接）、YouTube（仅链接）、Bigo、PandaLive、FC2、Steam、JD、Kugou、百度（仅详情）、SixRoom、LOOK、17LIVE。
+
+首批五站详情：
 
 | 平台 | 列表/分类/详情 | 取流 | 弹幕 |
 |---|---|---|---|
@@ -60,7 +69,7 @@ HAoLive.xcodeproj/  Xcode 工程（生成脚本见下方）
 ## HAo 自己的设计（与 Pure Live 的不同）
 
 - 界面：大标题 + 16:9 卡片 + 红色 LIVE 角标 + 平台色小徽标；分区页是平台横轨 + 分类 chips
-- 合并搜索：五站并行搜、平台顺序合并、去重（Pure Live 的搜索也是聚合，但合并规则与呈现是我们自己的）
+- 合并搜索：多站并行搜、平台顺序合并、去重（Pure Live 的搜索也是聚合，但合并规则与呈现是我们自己的）
 - 弹幕浮层：底部气泡叠加、可调字号/透明度、关键词屏蔽
 - 播放规则：画质线路只报平台实际提供的档位，不虚构；进房自动记历史
 
@@ -74,11 +83,12 @@ open HAoLive.xcodeproj
 
 首次构建需在 Xcode 里选自己的 Team 签名。本机 Linux VM 无 Xcode，无法验证 Xcode 构建（见“未验证”）。
 
-工程文件由 `~/workspace/.tmp/gen_haolive_pbx.py` 生成（确定性 ID，改文件清单后重跑）。
+工程文件手写维护，**不要重跑 `~/workspace/.tmp/gen_haolive_pbx.py`**（生成器没有 SPM 支持，重跑会丢掉手加的 MPVKit 引用）。
 
-## 未验证
+## 未验证（build 11，待真机确认）
 
-- Xcode 构建未验（本机无 Xcode，需 Mac/CI 跑 `xcodebuild`；GitHub Actions 已配 iOS 模拟器构建检查）
-- 真机播放未验：斗鱼取流（-9）、虎牙 HLS（本 VM 403）、快手全部、抖音 webcast 列表/搜索、抖音弹幕 WS 握手，均需国内网络的真机确认
-- 虎牙弹幕（TAF/JCE）与快手弹幕（protobuf）未实现，需实采一帧再写解码
-- Bilibili 弹幕 WS 从本 VM 连上后被服务端关闭（出口 IP 被风控），只验了帧解析，未验整条接收链路
+- GL 在 iOS 27 真机上是否建得出来 / 当前走 GL 还是 SW；原画还卡不卡
+- 斗鱼画面；抖音画面；GL 渲染比例/填充；虎牙 125s 租约断线瞬间的拼接切换
+- 新平台在设备上的播放（CHZZK、17LIVE、JD 详情、Bigo token、niconico/FC2 会话存活期、Twitch integrity）
+- 新平台弹幕（Missevan/AcFun/Kugou/JD/LOOK 未做；其余 WS join 未联调）；抖音 WebP 解码；快手分区图标
+- 已知缺口（不是漏报）：虎牙原生 WUP token 未移植；LiveMe 直连房取流失败；YouTube/TikTok 大陆基本打不开；IPTV 未加；无代理设置

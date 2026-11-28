@@ -18,25 +18,33 @@
 // CVPixelBuffer, which an AVSampleBufferDisplayLayer shows
 // zero-copy. libmpv exposes no Metal render API (render.h has
 // only MPV_RENDER_API_TYPE_OPENGL + the software renderer), and
-// OpenGL ES is what media_kit still ships on iOS. The SOFTWARE
-// renderer stays as the fallback: it is used on the simulator
-// (media_kit disables GL there — "an incompatibility with
-// OpenGL ES") and whenever EAGLContext creation fails. Since
-// build 9 the SW path is FLV-only (HLS goes to the hardware
-// player first), capped at 1280x720, and zero-copy: frames render
-// into a two-slot pool and the CGImage reads the slot directly
-// (FrameBufferPool), instead of a Data(bytes:) memcpy per frame.
-// The GL path renders at native video size up to 1920x1080 — the
-// GPU scales, the CPU never sees the pixels.
+// OpenGL ES is what media_kit still ships on iOS (verified
+// 2026-11-28 against media_kit_video's current docs/changelog:
+// iOS = MPV_RENDER_API_TYPE_OPENGL + pixel buffer, software =
+// MPV_RENDER_API_TYPE_SW + pixel buffer; only macOS moved to
+// METAL). The SOFTWARE renderer stays as the fallback: it is used
+// on the simulator (media_kit disables GL there — "an
+// incompatibility with OpenGL ES") and whenever EAGLContext
+// creation fails. Build 11: the fallback is no longer silent —
+// the engine records which path is active (renderPath) and the
+// GL failure reason, so 原画 lag can finally be attributed to a
+// path instead of guessed at. Since build 9 the SW path is capped
+// at 1280x720, and zero-copy: frames render into a two-slot pool
+// and the CGImage reads the slot directly (FrameBufferPool),
+// instead of a Data(bytes:) memcpy per frame. The GL path renders
+// at native video size up to 1920x1080 — the GPU scales, the CPU
+// never sees the pixels.
 //
-// OPTIONS: Pure Live's MediaKitLiveProperties table, translated:
-// protocol whitelist, 2 MB probe, 2 s analyze, 15 s network
-// timeout, hwdec auto + software fallback, 30 s cache, 96 MB
-// demuxer cap (40 MB on <=4-core devices), 8 s readahead,
-// decoder+vo framedrop; low-end devices add the reconnect /
-// lowres / skiploopfilter set. Per source: http-header-fields
-// (the playback headers), demuxer-lavf-format 'hls' for HLS,
-// force-seekable no, cache-pause no (live).
+// ENGINE (build 11, wzgrx v4 + chen 19:03): mpv is the ONLY
+// engine. Build 9/10 sent HLS to the system player first — chen
+// 2026-11-28: that was my own deviation, wrong — and the system
+// player fallback is deleted with it (AVPlayerEngine.swift gone).
+//
+// OPTIONS: wzgrx MpvEngineConfig.liveProperties, verbatim:
+// 1 MiB probe, 1 s analyze, 15 s network timeout, cache-secs 6,
+// 32 MB max-bytes, 4 MB max-back-bytes, 2 s readahead,
+// force-seekable yes, hwdec auto-safe by default. Per open:
+// hwdec, http-proxy, volume-gain (wzgrx MpvEngine.open).
 //
 // ENUMS: mpv's C enums are used as their BARE constants
 // (MPV_FORMAT_FLAG, MPV_EVENT_SHUTDOWN, MPV_RENDER_PARAM_API_TYPE,
@@ -53,10 +61,32 @@
 import Libmpv
 import CoreGraphics
 import Foundation
+import os
 import UIKit
 
 @MainActor final class MpvPlayerEngine: PlayerEngine {
     let name = "mpv"
+
+    /// Which render path this engine is actually using (build 11).
+    /// The GL path used to fail silently: tryEnableGL returned
+    /// false and the engine fell back to the software renderer
+    /// with no log and no state anywhere — the likely cause of
+    /// 原画 lag on all platforms (chen 2026-11-28: every platform
+    /// lags at 原画). The service shows this in engineName and the
+    /// log, so a device report can finally say GL or SW.
+    enum RenderPath: Equatable {
+        case gl
+        case sw
+        case glFailed(String)
+    }
+
+    private(set) var renderPath: RenderPath = .sw
+
+    /// hwdec mode from SettingsStore (Pure Live's hwdec setting):
+    /// auto / auto-safe / no. Set by the room view before open();
+    /// the engine is created per open, so the current value
+    /// applies on the next room entry.
+    static var hwdecMode = "auto-safe"
 
     weak var delegate: (any PlayerEngineDelegate)?
 
@@ -125,7 +155,10 @@ import UIKit
 
     func canPlay(_ stream: PlayStream) -> Bool {
         // mpv plays everything we offer (FLV / HLS / RTMP / mp4).
-        true
+        // A stalled GL engine is unusable — the sweep must move to
+        // the next engine instead of retrying the dead GPU path.
+        if glStalled { return false }
+        return true
     }
 
     // MARK: - Lifecycle
@@ -145,14 +178,20 @@ import UIKit
             return
         }
         // GPU path first on device (media_kit's rule: the simulator
-        // never gets GL). When it cannot be built, fall through to
-        // the software renderer below.
+        // never gets GL). When it cannot be built, the failure
+        // reason is recorded (MpvGLRenderer.lastFailureReason) and
+        // the engine falls through to the software renderer below —
+        // and says so, instead of the old silent fallback.
         #if canImport(OpenGLES) && !targetEnvironment(simulator)
         if tryEnableGL(handle) {
+            renderPath = .gl
             observeVideoSize(handle)
             startEventThread()
             return
         }
+        let glReason = MpvGLRenderer.lastFailureReason ?? "EAGL 不可用"
+        renderPath = .glFailed(glReason)
+        Logger(subsystem: "live.haostudio", category: "player").error("mpv GL 路径失败，走软渲染：\(glReason, privacy: .public)")
         #endif
         createRenderContext(handle)
         startEventThread()
@@ -167,9 +206,25 @@ import UIKit
         guard let renderer = MpvGLRenderer(handle: handle, displayLayer: glView.sampleLayer, onFirstFrame: { [weak self] in
             Task { @MainActor in self?.reportGLFirstFrame() }
         }) else { return false }
+        renderer.onStalled = { [weak self] in
+            Task { @MainActor in self?.reportGLStalled() }
+        }
         self.glVideoViewInstance = glView
         self.glRenderer = renderer
         return true
+    }
+
+    /// A presented-frame stall marks the mpv engine unusable
+    /// (canPlay false) so the sweep does not retry the same dead
+    /// GPU path on the next candidate. The service recreates the
+    /// engine once for it (wzgrx recovery step 3) — see the
+    /// delegate below.
+    private(set) var glStalled = false
+    private func reportGLStalled() {
+        guard !glStalled else { return }
+        glStalled = true
+        renderPath = .glFailed(MpvGLRenderer.lastFailureReason ?? "GPU 渲染槽位为空")
+        delegate?.engine(self, didFailWith: "GPU 渲染失败，已切换线路")
     }
 
     /// First GL frame: same ready signal the SW path reports from
@@ -214,16 +269,15 @@ import UIKit
         opened = false
         paused = false
         firstFrameReported = false
-        // Per-source properties (Pure Live's per-source table).
+        // Per-open properties (wzgrx MpvEngine.open + openMpvMediaInput):
+        // hwdec, http-proxy, volume-gain. Nothing else is set per
+        // open — force-seekable (yes) lives in liveProperties, the
+        // demuxer format is only forced for RTP (mpegs), which
+        // HAoLive has no source for, and cache-pause is not set
+        // by wzgrx at all. The old per-open force-seekable=no /
+        // cache-pause=no / demuxer-lavf-format=hls lines undid
+        // the table and are deleted.
         setOption(handle, "http-proxy", "")
-        // Only force the demuxer for HLS; for FLV (and anything else)
-        // lavf probes the container itself. Setting "" for FLV was a
-        // needless difference between the two paths.
-        if format == "hls" {
-            setOption(handle, "demuxer-lavf-format", "hls")
-        }
-        setOption(handle, "force-seekable", "no")
-        setOption(handle, "cache-pause", "no")
         if !headers.isEmpty {
             // "Field: value, Field: value" — our headers carry no commas.
             let fields = headers
@@ -299,37 +353,34 @@ import UIKit
     // MARK: - Options (Pure Live's MediaKitLiveProperties table)
 
     private func applyOptions(_ handle: OpaquePointer) {
-        let lowEnd = ProcessInfo.processInfo.processorCount <= 4
-        setOption(handle, "vo", "libmpv")
-        setOption(handle, "ao", "audiounit")
-        setOption(handle, "hwdec", "auto")
+        // wzgrx MpvEngineConfig.liveProperties, verbatim
+        // (packages/live_player/lib/src/mpv_options.dart). iOS-only
+        // additions, marked: vo=libmpv is the render API the GL path
+        // needs (wzgrx iOS has only libmpv as video output driver);
+        // ao=audiounit is mpv's iOS default (wzgrx leaves ao unset
+        // on iOS). Everything else is exactly wzgrx's table — the
+        // old 3.x values (2 MiB probe, 30 s cache, 8 s readahead,
+        // 96 MB buffer, low-end lowres preset, framedrop) are gone:
+        // wzgrx measured first frame 1802 ms -> 708 ms with the
+        // 1 MiB / 1 s probe, and plays 原画 on these values.
+        setOption(handle, "vo", "libmpv") // iOS render API (see above)
+        setOption(handle, "ao", "audiounit") // iOS default (see above)
+        // hwdec follows the setting (Pure Live's hwdec setting:
+        // auto / auto-safe / no; wzgrx default auto-safe).
+        setOption(handle, "hwdec", Self.hwdecMode)
         setOption(handle, "hwdec-software-fallback", "1")
+        setOption(handle, "force-seekable", "yes")
         setOption(handle, "protocol-whitelist", "httpproxy,udp,rtp,tcp,tls,data,file,http,https,crypto,rtmp,rtmps,rtsp,srt")
-        setOption(handle, "demuxer-lavf-probesize", "2097152")
-        setOption(handle, "demuxer-lavf-analyzeduration", "2")
+        setOption(handle, "demuxer-lavf-probesize", "1048576")
+        setOption(handle, "demuxer-lavf-analyzeduration", "1")
         setOption(handle, "network-timeout", "15")
         setOption(handle, "cache", "yes")
         setOption(handle, "cache-on-disk", "no")
-        setOption(handle, "cache-secs", "30")
-        setOption(handle, "demuxer-max-bytes", lowEnd ? "41943040" : "100663296")
-        setOption(handle, "demuxer-max-back-bytes", lowEnd ? "5242880" : "8388608")
+        setOption(handle, "cache-secs", "6")
+        setOption(handle, "demuxer-max-bytes", "33554432")
+        setOption(handle, "demuxer-max-back-bytes", "4194304")
         setOption(handle, "demuxer-donate-buffer", "no")
-        setOption(handle, "demuxer-readahead-secs", "8")
-        setOption(handle, "cache-pause-wait", "4")
-        setOption(handle, "demuxer-thread", "yes")
-        setOption(handle, "framedrop", "decoder+vo")
-        // Volume is the system slider's job on iOS (Pure Live sets an
-        // internal gain of 1.0 on iOS/Android); keep mpv at full gain.
-        setOption(handle, "volume", "100")
-        if lowEnd {
-            setOption(handle, "audio-buffer", "0.4")
-            setOption(handle, "stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=2")
-            setOption(handle, "vd-lavc-threads", "2")
-            setOption(handle, "vd-lavc-o", "lowres=1")
-            setOption(handle, "vd-lavc-skiploopfilter", "nonref")
-        } else {
-            setOption(handle, "vd-lavc-o", "lowres=0")
-        }
+        setOption(handle, "demuxer-readahead-secs", "2")
         #if DEBUG
         setOption(handle, "msg-level", "all=v")
         #else
@@ -596,9 +647,10 @@ import UIKit
         // (which only has name/format/data) — primary #22.
         // SW cap 1280x720: the software renderer rasterises every
         // pixel on the CPU, and 1080p rooms were the build 8 lag
-        // (HLS goes to the hardware player first now; this cap is for
-        // the FLV rooms that still need mpv). The GL path renders at
-        // native size up to 1920x1080 — the GPU scales.
+        // (all formats go to mpv now — no system player first;
+        // this cap is for rooms that fall back to the SW path).
+        // The GL path renders at native size up to 1920x1080 — the
+        // GPU scales.
         if event.reply_userdata == 1 {
             renderSize.width = CGFloat(min(value, 1280))
             #if canImport(OpenGLES)

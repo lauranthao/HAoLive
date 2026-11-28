@@ -9,7 +9,6 @@ struct SettingsView: View {
     @EnvironmentObject private var historyStore: HistoryStore
 
     @State private var newKeyword = ""
-    @State private var showingClearCacheDone = false
     @State private var toolboxLink = ""
     @State private var toolboxRoom: LiveRoom?
     @State private var toolboxMessage: String?
@@ -60,15 +59,26 @@ struct SettingsView: View {
             Section("播放器") {
                 Picker("优先画质", selection: $settingsStore.preferredQuality) {
                     Text("自动").tag("")
-                    ForEach(["原画", "超清", "高清", "流畅"], id: \.self) { quality in
+                    ForEach(["原画", "蓝光8M", "蓝光4M", "超清", "高清", "流畅"], id: \.self) { quality in
+                        Text(quality).tag(quality)
+                    }
+                }
+                Picker("蜂窝网络优先画质", selection: $settingsStore.preferredQualityCellular) {
+                    Text("自动").tag("")
+                    ForEach(["原画", "蓝光8M", "蓝光4M", "超清", "高清", "流畅"], id: \.self) { quality in
                         Text(quality).tag(quality)
                     }
                 }
                 Picker("优先线路", selection: $settingsStore.preferredLine) {
                     Text("自动").tag("")
-                    ForEach(["线路1", "线路2"], id: \.self) { line in
+                    ForEach(["线路1", "线路2", "线路3"], id: \.self) { line in
                         Text(line).tag(line)
                     }
+                }
+                Picker("硬件解码", selection: $settingsStore.hwdecMode) {
+                    Text("自动").tag("auto")
+                    Text("自动（安全）").tag("auto-safe")
+                    Text("关闭").tag("no")
                 }
             }
 
@@ -156,7 +166,7 @@ struct SettingsView: View {
                 LabeledContent("图片缓存", value: settingsStore.imageCacheSizeText)
                 Button("清理图片缓存", role: .destructive) {
                     CoverImageCache.shared.clear()
-                    showingClearCacheDone = true
+                    ToastCenter.shared.show("已清理图片缓存")
                 }
                 Text("只清理图片缓存；收藏和历史不受影响。")
                     .font(.caption)
@@ -176,9 +186,6 @@ struct SettingsView: View {
         .navigationTitle("设置")
         .navigationDestination(item: $toolboxRoom) { room in
             LiveRoomView(room: room)
-        }
-        .alert("已清理图片缓存", isPresented: $showingClearCacheDone) {
-            Button("好", role: .cancel) {}
         }
     }
 

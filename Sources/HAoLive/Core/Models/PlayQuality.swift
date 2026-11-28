@@ -27,11 +27,18 @@ struct PlayStream: Identifiable, Hashable, Codable, Sendable {
     /// with a default would not be), so existing construction
     /// sites compile unchanged.
     var expiresAt: Date? = nil
+    /// Container the platform declared for this URL (Pure Live's
+    /// LiveStreamFacts.format). Nil = derive from the URL.
+    /// Bilibili's FLV lines need it: their http_stream URLs do
+    /// not always end in .flv, and without it AVPlayer would try
+    /// them first and the sweep would waste an attempt.
+    var formatOverride: String? = nil
 
     /// Container declared by the URL ("flv" / "hls" / ""), so the
     /// engine does not have to probe for it (Pure Live's
     /// LiveStreamFacts.format, carried in the source metadata).
     var format: String {
+        if let override = formatOverride, !override.isEmpty { return override }
         let path = url.path.lowercased()
         if path.hasSuffix(".flv") { return "flv" }
         if path.hasSuffix(".m3u8") { return "hls" }
@@ -45,8 +52,7 @@ struct PlayStream: Identifiable, Hashable, Codable, Sendable {
     /// (verified live 2026-11-27: signed getH5PlayV1 returns no
     /// hls_url at any rate or CDN).
     var isFLV: Bool {
-        let path = url.path.lowercased()
-        return url.scheme?.lowercased() == "rtmp" || path.hasSuffix(".flv")
+        format == "flv" || url.scheme?.lowercased() == "rtmp"
     }
 
     /// ATS blocks plain-http media: upgrade http:// stream URLs to
@@ -83,20 +89,57 @@ enum StreamPicker {
     /// fall back to the first stream of the preferred quality,
     /// then to the first stream overall. Never returns a stream
     /// the platform did not offer.
+    ///
+    /// Pure Live's default-quality rule (_setDefaultResolution):
+    /// the preferred label if offered; otherwise the preference's
+    /// POSITION in the canonical ladder, mapped proportionally
+    /// onto the available list (ratio fallback) — e.g. prefer
+    /// 流畅 but only 原画/超清 exist → the lowest available,
+    /// not silently the best.
     static func best(streams: [PlayStream], preferredQuality: String?, preferredLine: String?) -> PlayStream? {
         guard !streams.isEmpty else { return nil }
         if let quality = preferredQuality {
             let inQuality = streams.filter { $0.quality == quality }
-            if let line = preferredLine, let match = inQuality.first(where: { $0.line == line }) {
+            if let line = preferredLine, let match = matchLine(inQuality, preferredLine: line) {
                 return match
             }
             if let first = inQuality.first {
                 return first
             }
+            let qualities = qualities(of: streams)
+            let preferLevel = qualityLadder.firstIndex(of: quality) ?? -1
+            let preferRatio = Double(max(preferLevel, 0)) / Double(max(qualityLadder.count - 1, 1))
+            let targetIndex = min(max(Int((preferRatio * Double(max(qualities.count - 1, 0))).rounded()), 0), max(qualities.count - 1, 0))
+            let inTarget = streams.filter { $0.quality == qualities[targetIndex] }
+            if let line = preferredLine, let match = matchLine(inTarget, preferredLine: line) {
+                return match
+            }
+            if let first = inTarget.first {
+                return first
+            }
         }
-        if let line = preferredLine, let match = streams.first(where: { $0.line == line }) {
+        if let line = preferredLine, let match = matchLine(streams, preferredLine: line) {
             return match
         }
         return streams.first
+    }
+
+    /// Pure Live's canonical quality ladder (player_consts.dart:
+    /// resolutions), used only for the ratio fallback in best().
+    static let qualityLadder = ["原画", "蓝光8M", "蓝光4M", "超清", "流畅"]
+
+    /// Line match: exact label first; "线路N" means the Nth line
+    /// (1-based) in listed order. The settings picker offers
+    /// 线路1/2/3, but real line names are CDN codes (ws-h5…), so
+    /// an exact match could never hit — the old preference was
+    /// dead. The list passed in is already one quality's lines.
+    private static func matchLine(_ streams: [PlayStream], preferredLine: String) -> PlayStream? {
+        if let exact = streams.first(where: { $0.line == preferredLine }) { return exact }
+        guard preferredLine.hasPrefix("线路"),
+              let n = Int(preferredLine.dropFirst("线路".count)), n >= 1,
+              let quality = streams.first?.quality else { return nil }
+        let orderedLines = lines(of: streams, quality: quality)
+        guard n <= orderedLines.count else { return nil }
+        return streams.first { $0.line == orderedLines[n - 1] }
     }
 }

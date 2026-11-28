@@ -41,13 +41,13 @@ struct CategoriesView: View {
                 starredSection
             }
             if isLoadingCategories {
-                ProgressView().padding(.top, 40)
+                ProgressView().padding(.top, HaoLiveDesign.emptyStateTopPadding)
             } else if categories.isEmpty {
                 ContentUnavailableView("分区加载失败", systemImage: "square.grid.2x2", description: Text("下拉重试"))
-                    .padding(.top, 40)
+                    .padding(.top, HaoLiveDesign.emptyStateTopPadding)
             } else if filteredCategories.isEmpty {
                 ContentUnavailableView.search(text: searchText)
-                    .padding(.top, 40)
+                    .padding(.top, HaoLiveDesign.emptyStateTopPadding)
             } else {
                 LazyVGrid(columns: columns, spacing: HaoLiveDesign.gridSpacing) {
                     ForEach(filteredCategories) { category in
@@ -58,11 +58,10 @@ struct CategoriesView: View {
                                 onToggleStar: { toggleStar(category) }
                             )
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.interactiveCard)
                     }
                 }
-                .padding(.horizontal, HaoLiveDesign.pagePadding)
-                .padding(.vertical, 8)
+                .padding(HaoLiveDesign.pagePadding)
             }
         }
         .refreshable { await reload() }
@@ -92,12 +91,12 @@ struct CategoriesView: View {
                             Text(platform.shortName)
                                 .font(.subheadline.weight(.semibold))
                         }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
+                        .padding(.horizontal, HaoLiveDesign.chipHorizontalPadding)
+                        .padding(.vertical, HaoLiveDesign.chipVerticalPadding)
                         .background(selectedPlatform == platform ? Color(hex: platform.colorHex).opacity(0.15) : Color(.secondarySystemBackground), in: Capsule())
                         .foregroundStyle(selectedPlatform == platform ? Color(hex: platform.colorHex) : .primary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
             }
             .padding(.horizontal, HaoLiveDesign.pagePadding)
@@ -117,7 +116,7 @@ struct CategoriesView: View {
             }
         }
         .padding(10)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: HaoLiveDesign.controlCornerRadius))
         .padding(.horizontal, HaoLiveDesign.pagePadding)
         .padding(.bottom, 4)
     }
@@ -132,13 +131,13 @@ struct CategoriesView: View {
                     ForEach(starredCategories) { category in
                         NavigationLink(value: category) {
                             Text(category.name)
-                                .font(.subheadline)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, HaoLiveDesign.chipHorizontalPadding)
+                                .padding(.vertical, HaoLiveDesign.chipVerticalPadding)
                                 .background(Color(.secondarySystemBackground), in: Capsule())
                                 .foregroundStyle(.primary)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressable)
                     }
                 }
                 .padding(.horizontal, HaoLiveDesign.pagePadding)
@@ -184,9 +183,9 @@ private struct CategoryCard: View {
     var body: some View {
         VStack(spacing: 6) {
             ZStack(alignment: .topTrailing) {
-                CategoryIcon(url: category.iconURL, name: category.name)
+                CategoryIcon(url: category.iconURL, name: category.name, platform: category.platform)
                     .frame(height: 64)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .clipShape(RoundedRectangle(cornerRadius: HaoLiveDesign.controlCornerRadius))
                 Button(action: onToggleStar) {
                     Image(systemName: starred ? "star.fill" : "star")
                         .font(.caption)
@@ -207,17 +206,19 @@ private struct CategoryCard: View {
 }
 
 /// Category artwork via the shared cover cache (per-host Referer);
-/// a first-letter tile when the platform provides no artwork.
+/// a first-letter tile in the platform colour when the platform
+/// provides no artwork.
 private struct CategoryIcon: View {
     let url: URL?
     let name: String
+    let platform: LivePlatform
 
     @State private var image: UIImage?
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(hex: "#3A3A3C").opacity(0.35))
+            RoundedRectangle(cornerRadius: HaoLiveDesign.controlCornerRadius)
+                .fill(Color(hex: platform.colorHex))
             if let image {
                 Image(uiImage: image)
                     .resizable()

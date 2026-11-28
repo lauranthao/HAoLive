@@ -1,7 +1,7 @@
 // HTTPClient.swift
 // HAo Live — one URLSession wrapper for all platform adapters.
 // Browser-style headers (the platforms' web APIs answer a browser UA;
-// the probes showed several endpoints 403 without one), 15s timeout,
+// the probes showed several endpoints 403 without one), 20s timeout,
 // and HTTP-status errors surfaced as LiveSiteError so the UI can show
 // a real message instead of a silent empty list.
 
@@ -24,7 +24,7 @@ final class HTTPClient: Sendable {
         self.session = session
     }
 
-    func get(_ urlString: String, headers: [String: String] = [:], timeout: TimeInterval = 15) async throws -> Data {
+    func get(_ urlString: String, headers: [String: String] = [:], timeout: TimeInterval = 20) async throws -> Data {
         guard let url = URL(string: urlString) else { throw LiveSiteError.invalidResponse }
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "GET"
@@ -37,7 +37,7 @@ final class HTTPClient: Sendable {
         return try await perform(request)
     }
 
-    func getJSON(_ urlString: String, headers: [String: String] = [:], timeout: TimeInterval = 15) async throws -> JSONValue {
+    func getJSON(_ urlString: String, headers: [String: String] = [:], timeout: TimeInterval = 20) async throws -> JSONValue {
         let data = try await get(urlString, headers: headers, timeout: timeout)
         guard let json = JSONValue.parse(data) else { throw LiveSiteError.invalidResponse }
         return json
@@ -50,7 +50,7 @@ final class HTTPClient: Sendable {
     /// in one value; the caller scans it for the cookie names it
     /// needs instead of splitting on commas (cookie dates contain
     /// commas, so a comma split would corrupt Expires values).
-    func getWithHeaders(_ urlString: String, headers: [String: String] = [:], timeout: TimeInterval = 15) async throws -> (data: Data, headers: [String: String]) {
+    func getWithHeaders(_ urlString: String, headers: [String: String] = [:], timeout: TimeInterval = 20) async throws -> (data: Data, headers: [String: String]) {
         guard let url = URL(string: urlString) else { throw LiveSiteError.invalidResponse }
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "GET"
@@ -71,7 +71,7 @@ final class HTTPClient: Sendable {
     }
 
     /// POST with application/x-www-form-urlencoded body (Douyu's play API).
-    func postForm(_ urlString: String, fields: [String: String], headers: [String: String] = [:], timeout: TimeInterval = 15) async throws -> Data {
+    func postForm(_ urlString: String, fields: [String: String], headers: [String: String] = [:], timeout: TimeInterval = 20) async throws -> Data {
         guard let url = URL(string: urlString) else { throw LiveSiteError.invalidResponse }
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "POST"
@@ -82,8 +82,16 @@ final class HTTPClient: Sendable {
         }
         request.httpBody = fields
             .map { key, value in
-                let k = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
-                let v = value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value
+                // Strict application/x-www-form-urlencoded encoding
+                // (build 11, found by the LOOK group): .urlQueryAllowed
+                // leaves `+` unencoded, and a form body reads `+` as
+                // a space — a base64 value (LOOK WeAPI `params`) came
+                // back as HTTP 200 with an empty body. Only
+                // alphanumerics + -._* pass through; space becomes
+                // `+`; everything else (%2B for `+`, %2F for `/`,
+                // %3D for `=`, %26 for `&`) is percent-encoded.
+                let k = Self.formEncode(key)
+                let v = Self.formEncode(value)
                 return "\(k)=\(v)"
             }
             .joined(separator: "&")
@@ -91,8 +99,36 @@ final class HTTPClient: Sendable {
         return try await perform(request)
     }
 
-    func postFormJSON(_ urlString: String, fields: [String: String], headers: [String: String] = [:], timeout: TimeInterval = 15) async throws -> JSONValue {
+    /// One application/x-www-form-urlencoded field (see postForm).
+    static func formEncode(_ string: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._*")
+        let encoded = string.addingPercentEncoding(withAllowedCharacters: allowed) ?? string
+        return encoded.replacingOccurrences(of: "%20", with: "+")
+    }
+
+    func postFormJSON(_ urlString: String, fields: [String: String], headers: [String: String] = [:], timeout: TimeInterval = 20) async throws -> JSONValue {
         let data = try await postForm(urlString, fields: fields, headers: headers, timeout: timeout)
+        guard let json = JSONValue.parse(data) else { throw LiveSiteError.invalidResponse }
+        return json
+    }
+
+    /// POST with a raw JSON body (Twitch GraphQL, YouTube InnerTube).
+    func postJSON(_ urlString: String, jsonData: Data, headers: [String: String] = [:], timeout: TimeInterval = 20) async throws -> Data {
+        guard let url = URL(string: urlString) else { throw LiveSiteError.invalidResponse }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = "POST"
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        request.httpBody = jsonData
+        return try await perform(request)
+    }
+
+    func postJSONParsed(_ urlString: String, jsonData: Data, headers: [String: String] = [:], timeout: TimeInterval = 20) async throws -> JSONValue {
+        let data = try await postJSON(urlString, jsonData: jsonData, headers: headers, timeout: timeout)
         guard let json = JSONValue.parse(data) else { throw LiveSiteError.invalidResponse }
         return json
     }

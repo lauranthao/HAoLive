@@ -87,10 +87,8 @@ struct HotView: View {
                 .font(.subheadline.weight(.semibold))
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .background(selected ? HaoLiveDesign.liveRed : Color(.secondarySystemBackground), in: Capsule())
-                .foregroundStyle(selected ? .white : .primary)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.chip(isSelected: selected))
     }
 
     private func sites() -> [any LiveSite] {

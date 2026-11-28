@@ -1,14 +1,11 @@
 // PlayerEngine.swift
 // HAo Live — one playback backend behind LivePlayerService.
-// Pure Live's player kernel, translated to Swift: the facade sweeps
-// candidates × engines (mpv pinned first, then the system player for
-// HLS), and an engine reports ready only when it can actually show
-// a picture. A hard error — or an open that never shows a frame
+// wzgrx/PureLive v4: mpv is the only engine ("the only engine
+// in v4"), and chen 19:03 decided no system player, only mpv.
+// The facade sweeps candidates on that one engine, and the
+// engine reports ready only when it can actually show a
+// picture. A hard error — or an open that never shows a frame
 // within the watchdog — advances the sweep to the next candidate.
-//
-// mpv is the only engine that plays FLV. The system player
-// (BetterPlayer's iOS engine in Pure Live) is the HLS-only fallback
-// in their chain as written — it is never tried for FLV.
 
 import Foundation
 import UIKit
@@ -16,8 +13,8 @@ import UIKit
 /// One playback backend. Engines are created once by the service and
 /// reused across opens; `open` replaces the current media.
 ///
-/// @MainActor (build 7, primary #25): the protocol and both engine
-/// classes are main-actor-isolated. The #23 fix — changing the Task
+/// @MainActor (build 7, primary #25): the protocol and the engine
+/// class are main-actor-isolated. The #23 fix — changing the Task
 /// hops from `[weak self]` to a strong capture — did not take, because
 /// the error was never the capture list: a non-Sendable, nonisolated
 /// `self` cannot be *used* inside a `Task { @MainActor in }` at all
@@ -28,12 +25,12 @@ import UIKit
 /// those paths are `nonisolated` with explicit hops — see
 /// MpvPlayerEngine.
 @MainActor protocol PlayerEngine: AnyObject {
-    /// "mpv" / "系统播放器" — shown in the player UI and logs.
+    /// "mpv" — shown in the player UI and logs.
     var name: String { get }
 
     /// Whether this engine can play the stream's container at all
-    /// (Pure Live's format capability filter: FLV excludes the
-    /// system player; mpv plays everything).
+    /// (mpv plays everything we offer; a GL-stalled engine
+    /// reports false until it is recreated).
     func canPlay(_ stream: PlayStream) -> Bool
 
     /// The view this engine renders into. The service puts it in its

@@ -7,6 +7,7 @@
 
 import SwiftUI
 import UIKit
+import os
 
 /// Cached cover loader. Some image CDNs refuse bare requests, so the
 /// request carries the platform's Referer (Pure Live does the same
@@ -16,23 +17,58 @@ final class CoverImageCache {
     // other mutable state, so the shared instance needs no isolation.
     nonisolated(unsafe) static let shared = CoverImageCache()
 
+    private static let logger = Logger(subsystem: "live.haostudio", category: "cover")
+
     private let cache = NSCache<NSString, UIImage>()
-    private let session = URLSession.shared
+    /// Disk cache for covers: memory alone re-downloads everything
+    /// on every cold start and page turn.
+    private static let urlCache = URLCache(
+        memoryCapacity: 20 * 1024 * 1024,
+        diskCapacity: 200 * 1024 * 1024,
+        diskPath: "hao-live-covers"
+    )
+    private let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.urlCache = urlCache
+        return URLSession(configuration: config)
+    }()
 
     private init() {
         cache.countLimit = 200
     }
 
+    /// Loads a cover: memory cache, then network with up to 2
+    /// retries (short backoff). A non-2xx response counts as a
+    /// failure — an error page must never be treated as an image.
+    /// Failures are logged (the old `try?` swallowed them, so a
+    /// dead cover stayed blank forever with no trace).
     func image(for url: URL) async -> UIImage? {
         let key = url.absoluteString as NSString
         if let cached = cache.object(forKey: key) { return cached }
-        var request = URLRequest(url: url, timeoutInterval: 15)
-        request.setValue(Self.referer(for: url), forHTTPHeaderField: "Referer")
-        request.setValue(HTTPClient.shared.userAgent, forHTTPHeaderField: "User-Agent")
-        guard let (data, _) = try? await session.data(for: request),
-              let image = UIImage(data: data) else { return nil }
-        cache.setObject(image, forKey: key)
-        return image
+        var lastError: (any Error)?
+        for attempt in 0..<3 {
+            do {
+                var request = URLRequest(url: url, timeoutInterval: 15)
+                request.setValue(Self.referer(for: url), forHTTPHeaderField: "Referer")
+                request.setValue(HTTPClient.shared.userAgent, forHTTPHeaderField: "User-Agent")
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                    throw LiveSiteError.httpStatus((response as? HTTPURLResponse)?.statusCode ?? 0)
+                }
+                guard let image = UIImage(data: data) else {
+                    throw LiveSiteError.invalidResponse
+                }
+                cache.setObject(image, forKey: key)
+                return image
+            } catch {
+                lastError = error
+                if attempt < 2 {
+                    try? await Task.sleep(for: .milliseconds(300 * (attempt + 1)))
+                }
+            }
+        }
+        Self.logger.warning("cover load failed: \(url.absoluteString, privacy: .public) \(String(describing: lastError), privacy: .public)")
+        return nil
     }
 
     /// Clear the in-memory cover cache and the shared URL cache.
@@ -40,6 +76,7 @@ final class CoverImageCache {
     /// not cache).
     func clear() {
         cache.removeAllObjects()
+        Self.urlCache.removeAllCachedResponses()
         URLCache.shared.removeAllCachedResponses()
     }
 
@@ -48,7 +85,7 @@ final class CoverImageCache {
         if host.contains("hdslb.com") || host.contains("bilibili.com") { return "https://live.bilibili.com/" }
         if host.contains("douyin") { return "https://live.douyin.com/" }
         if host.contains("kuaishou") || host.contains("yximgs.com") || host.contains("gifshow.com") { return "https://live.kuaishou.com/" }
-        if host.contains("huya.com") { return "https://www.huya.com/" }
+        if host.contains("msstatic.com") || host.contains("huya.com") { return "https://www.huya.com/" }
         if host.contains("douyu") { return "https://www.douyu.com/" }
         return "https://live.bilibili.com/"
     }
@@ -178,7 +215,7 @@ struct RoomGrid: View {
                 NavigationLink(value: room) {
                     RoomCard(room: room)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.interactiveCard)
             }
         }
     }

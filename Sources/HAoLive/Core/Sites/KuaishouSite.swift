@@ -62,7 +62,7 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
                   let name = item["name"].stringValue ?? item["categoryName"].stringValue ?? item["title"].stringValue,
                   !name.isEmpty, seen.insert(id).inserted else { return nil }
             let iconString = item["icon"].stringValue ?? item["iconUrl"].stringValue ?? item["pic"].stringValue ?? item["imgUrl"].stringValue ?? ""
-            return LiveCategory(id: "kuaishou-\(id)", platform: .kuaishou, name: name, iconName: nil, iconURL: URL(string: iconString))
+            return LiveCategory(id: "kuaishou-\(id)", platform: .kuaishou, name: name, iconName: nil, iconURL: Self.imageURL(iconString))
         }
     }
 
@@ -323,8 +323,8 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
             roomID: userID,
             title: HaoText.firstNonEmpty(entry["title"].stringValue, gameInfo["name"].stringValue) ?? "",
             anchorName: HaoText.firstNonEmpty(author["userName"].stringValue, author["nickname"].stringValue, author["name"].stringValue) ?? "",
-            anchorAvatarURL: URL(string: HaoText.firstNonEmpty(author["avatar"].stringValue, author["avatarUrl"].stringValue) ?? ""),
-            coverURL: URL(string: entry["cover"].stringValue ?? ""),
+            anchorAvatarURL: Self.imageURL(HaoText.firstNonEmpty(author["avatar"].stringValue, author["avatarUrl"].stringValue)),
+            coverURL: Self.imageURL(entry["cover"].stringValue),
             categoryName: gameInfo["name"].stringValue ?? gameInfo["gameName"].stringValue,
             viewerCount: entry["onlineCount"].intValue ?? entry["watchCount"].intValue ?? 0,
             isLive: entry["isLiving"].boolValue == true
@@ -351,8 +351,8 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
             roomID: userID,
             title: title,
             anchorName: author["name"].stringValue ?? "",
-            anchorAvatarURL: URL(string: author["avatar"].stringValue ?? ""),
-            coverURL: URL(string: HaoText.firstNonEmpty(item["poster"].stringValue, gameInfo["poster"].stringValue) ?? ""),
+            anchorAvatarURL: Self.imageURL(author["avatar"].stringValue),
+            coverURL: Self.imageURL(HaoText.firstNonEmpty(item["poster"].stringValue, gameInfo["poster"].stringValue)),
             categoryName: gameInfo["name"].stringValue,
             viewerCount: item["watchingCount"].intValue ?? 0,
             isLive: true,
@@ -372,8 +372,8 @@ final class KuaishouSite: LiveSite, @unchecked Sendable {
             roomID: userID,
             title: item["caption"].stringValue ?? "",
             anchorName: author["name"].stringValue ?? "",
-            anchorAvatarURL: URL(string: author["avatar"].stringValue ?? ""),
-            coverURL: URL(string: item["poster"].stringValue ?? ""),
+            anchorAvatarURL: Self.imageURL(author["avatar"].stringValue),
+            coverURL: Self.imageURL(item["poster"].stringValue),
             categoryName: gameInfo["name"].stringValue,
             viewerCount: item["watchingCount"].intValue ?? 0,
             isLive: true,

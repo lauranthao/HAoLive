@@ -63,6 +63,16 @@ enum PlaybackHeaders {
                 "origin": "https://live.kuaishou.com",
                 "referer": "https://live.kuaishou.com/u/\(roomID)",
             ]
+        default:
+            // New platforms (build 11): desktop UA + the
+            // platform's own Origin / Referer. Adapters that need
+            // more (cookies, per-line headers) carry them on the
+            // PlayStream itself.
+            headers = [
+                "user-agent": desktopUA,
+                "origin": platform.webBase,
+                "referer": "\(platform.webBase)/\(roomID)",
+            ]
         }
         if let cookie, !cookie.isEmpty {
             headers["cookie"] = cookie

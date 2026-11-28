@@ -21,7 +21,14 @@
 //   FLV-only, and AVPlayer cannot play FLV. The adapter returns the
 //   real FLV streams (the player reports them honestly instead of a
 //   black screen) until an FLV-capable engine (VLC/mpv) is wired in.
-//   rate map: 0 原画, 1 流畅, 2 高清, 3 超清.
+//   Quality labels come from the server's `multirates` list
+//   (verified live 2026-11-28, room 24422): 0 原画2K60 (bit
+//   20173), 4 蓝光4M, 3 超清, 2 高清 — and NO rate 1 (build 10's
+//   "流畅" was invented; a rate-1 request answers rate 2). The
+//   numeric `rate` is an opaque request code, not a bitrate, and
+//   the server may answer a different rate than requested — the
+//   UI shows what was actually served (applied rate), never the
+//   requested label.
 // Danmaku: raw TCP to openbarrage.douyutv.com:8601 (STT protocol);
 // the VM's egress proxy blocks raw TCP, so the channel is verified
 // by fixtures only — it runs on the user's phone, not through here.
@@ -38,10 +45,71 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
     private static let openBase = "https://open.douyucdn.cn/api/RoomApi"
     private static let webBase = "https://www.douyu.com"
 
-    /// Documented rate -> quality map for getH5PlayV1.
-    private static let rateQualities: [(rate: Int, quality: String)] = [
-        (0, "原画"), (3, "超清"), (2, "高清"), (1, "流畅"),
-    ]
+    /// The device id the signing binds to (Pure Live's
+    /// generateDeviceId, douyu_utils.dart:188): a per-process
+    /// random 32-hex string, used as did and in the dy_did /
+    /// acf_did cookies. The fixed "10000…1501" build 10 used is
+    /// only a fallback default in older code — the signing and
+    /// the cookie must share one did, and a stable process id is
+    /// what Pure Live generates when no cookie is stored.
+    private static let sessionDeviceID: String = {
+        UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }()
+
+    /// Encryption descriptor cache (Pure Live: 5 min, single
+    /// in-flight refresh — _maximumCacheAgeSeconds). The
+    /// descriptor is per did; the signing binds to it, so a
+    /// stale one fails the play call outright.
+    private static let encryptionCache = DouyuEncryptionCache()
+
+    private final class DouyuEncryptionCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cached: (enc: Encryption, fetchedAt: Date, did: String)?
+        private var inFlight: (did: String, task: Task<Encryption, Error>)?
+
+        /// Scoped locking only (withLock): lock.lock() in an async
+        /// context is an error in Swift 6 language mode — the lock
+        /// is never held across an await.
+        func encryption(did: String, forceRefresh: Bool, fetch: @escaping @Sendable () async throws -> Encryption) async throws -> Encryption {
+            enum Step { case cached(Encryption); case task(Task<Encryption, Error>) }
+            let step: Step = lock.withLock {
+                if !forceRefresh,
+                   let cached, cached.did == did,
+                   Date().timeIntervalSince(cached.fetchedAt) < 300 {
+                    return .cached(cached.enc)
+                }
+                if let inFlight, inFlight.did == did {
+                    return .task(inFlight.task)
+                }
+                let task = Task { try await fetch() }
+                inFlight = (did: did, task: task)
+                return .task(task)
+            }
+            switch step {
+            case .cached(let enc):
+                return enc
+            case .task(let task):
+                do {
+                    let enc = try await task.value
+                    lock.withLock {
+                        cached = (enc, Date(), did)
+                        inFlight = nil
+                    }
+                    return enc
+                } catch {
+                    lock.withLock { inFlight = nil }
+                    throw error
+                }
+            }
+        }
+
+        func drop() {
+            lock.withLock {
+                cached = nil
+                inFlight = nil
+            }
+        }
+    }
 
     /// The websec encryption descriptor for one signing session.
     /// expireAt is the descriptor's own expiry (unix seconds) —
@@ -69,7 +137,7 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
         data.arrayValue.compactMap { item in
             guard let id = item["cate_id"].stringValue,
                   let name = item["game_name"].stringValue, !name.isEmpty else { return nil }
-            return LiveCategory(id: "douyu-\(id)", platform: .douyu, name: name, iconName: nil, iconURL: URL(string: item["game_icon"].stringValue ?? ""))
+            return LiveCategory(id: "douyu-\(id)", platform: .douyu, name: name, iconName: nil, iconURL: Self.imageURL(item["game_icon"].stringValue))
         }
     }
 
@@ -139,95 +207,197 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
             roomID: id,
             title: data["room_name"].stringValue ?? "",
             anchorName: data["owner_name"].stringValue ?? "",
-            anchorAvatarURL: URL(string: data["avatar"].stringValue ?? ""),
-            coverURL: URL(string: data["room_thumb"].stringValue ?? ""),
+            anchorAvatarURL: Self.imageURL(data["avatar"].stringValue),
+            coverURL: Self.imageURL(data["room_thumb"].stringValue),
             categoryName: data["cate_name"].stringValue,
             viewerCount: data["online"].intValue ?? data["hn"].intValue ?? 0,
             isLive: data["room_status"].stringValue == "1"
         )
     }
 
-    // MARK: - Play URLs (signed getH5PlayV1)
+    // MARK: - Play URLs (signed getH5PlayV1, Pure Live's route)
+    //
+    // Pure Live's douyu_site.dart, in order:
+    //   1. Discovery: _requestPlayData(rate: -1) — one call returns
+    //      multirates (the advertised quality list, in the server's
+    //      order) + cdnsWithName + rtmp_cdn.
+    //   2. Per (rate, CDN): _requestPlayData(rate, cdn), sequential
+    //      (Pure Live resolves one CDN after another; the old
+    //      parallel 15-call burst took 10 s on this VM, sequential
+    //      is ~1 s for the selected tier). URLs are grouped by
+    //      APPLIED rate; the cohort whose applied rate equals the
+    //      requested rate wins, else the first acknowledged cohort
+    //      in platform order.
+    //   3. CDN order: rtmp_cdn first, then cdnsWithName in order,
+    //      scdn-* last.
+    //   4. did: per-process random 32-hex (sessionDeviceID), shared
+    //      by the signing and the dy_did / acf_did cookies.
+    //   5. Headers: the full request set on the encryption call AND
+    //      the play calls (build 10 sent NO headers on encryption
+    //      and no User-Agent on play).
+    //   6. Encryption descriptor cached 5 min, single in-flight
+    //      refresh.
+    //
+    // One-shot API note: Pure Live resolves only the SELECTED
+    // quality's CDNs (getPlayUrls is per-quality, ~1 s to first
+    // play); HAoLive's playURLs returns the full list for the
+    // picker, so it resolves every quality's CDNs (~3 s). The
+    // order is best-first and sequential, as Pure Live does it.
 
     func playURLs(room: LiveRoom) async throws -> [PlayStream] {
         let roomID = room.roomID
-        let did = Self.deviceID()
-        // One retry: a transient blip on the signing calls leaves
-        // the room with no streams at all (black page), and the
-        // sweep then has nothing to try.
-        guard let (enc, first) = try? await signedFirstPlay(roomID: roomID, did: did) else { return [] }
-        let cdns = Self.cdnCodes(fromPlayResponse: first)
-        var streams: [PlayStream] = []
-        if let stream = Self.stream(fromPlayResponse: first, quality: "原画", line: "主线路") {
-            streams.append(stream)
+        let did = Self.sessionDeviceID
+        // Discovery (rate -1): qualities + CDNs in one call.
+        // streamStatus 0 on THIS answer only means the room is on
+        // air but pushing no stream (wzgrx douyu_api.dart
+        // qualities(): StreamUnavailable) — the URLs it still
+        // carries 404 on every CDN, so fail here with a clear
+        // message instead of handing dead URLs to the player. A
+        // per-rate answer may say 0 for a room that played once
+        // (S09-24422-r2-hw-h5), so never judge those.
+        guard let discovery = try? await requestPlayData(roomID: roomID, rate: -1, cdn: "", did: did) else { return [] }
+        if discovery["data"]["streamStatus"].intValue == 0 {
+            throw LiveSiteError.message("主播暂未开播")
         }
-        // One request per (rate, CDN line), in parallel; tiers the
-        // server refuses are skipped, never faked.
-        await withTaskGroup(of: PlayStream?.self) { group in
-            for (rate, quality) in Self.rateQualities where rate != 0 {
-                for cdn in cdns {
-                    group.addTask {
-                        guard let json = try? await self.playV1(roomID: roomID, rate: rate, cdn: cdn, did: did, enc: enc) else { return nil }
-                        return Self.stream(fromPlayResponse: json, quality: quality, line: cdn.isEmpty ? "主线路" : cdn)
-                    }
-                }
-            }
-            // Extra CDN lines for the best quality.
-            for cdn in cdns where !cdn.isEmpty {
-                group.addTask {
-                    guard let json = try? await self.playV1(roomID: roomID, rate: 0, cdn: cdn, did: did, enc: enc) else { return nil }
-                    return Self.stream(fromPlayResponse: json, quality: "原画", line: cdn)
-                }
-            }
-            for await stream in group {
-                if let stream { streams.append(stream) }
-            }
-        }
-        // Best quality first (原画, 超清, 高清, 流畅).
-        let order = Self.rateQualities.map(\.quality)
+        let cdns = Self.cdnCodes(fromPlayResponse: discovery)
+        let qualities = Self.qualities(fromPlayData: discovery["data"])
         let headers = PlaybackHeaders.headers(platform: .douyu, roomID: roomID, cookie: "dy_did=\(did); acf_did=\(did)")
-        return streams
-            .sorted { order.firstIndex(of: $0.quality) ?? 99 < order.firstIndex(of: $1.quality) ?? 99 }
-            .map { stream in
-                var stream = stream
-                stream.headers = headers
-                return stream
+        var streams: [PlayStream] = []
+        var seenURLs: Set<String> = []
+        var seenQualityLines: Set<String> = []
+        // Best quality first, CDNs sequentially, applied-rate grouping.
+        for quality in qualities {
+            var byAppliedRate: [(applied: Int, urls: [PlayStream])] = []
+            for cdn in cdns {
+                guard let json = try? await requestPlayData(roomID: roomID, rate: quality.rate, cdn: cdn, did: did),
+                      let stream = Self.stream(fromPlayResponse: json, quality: quality.label, line: cdn.isEmpty ? "主线路" : cdn) else { continue }
+                let applied = Self.appliedRate(fromPlayResponse: json) ?? quality.rate
+                if let index = byAppliedRate.firstIndex(where: { $0.applied == applied }) {
+                    byAppliedRate[index].urls.append(stream)
+                } else {
+                    byAppliedRate.append((applied: applied, urls: [stream]))
+                }
             }
+            // Prefer the cohort the server served for the requested
+            // rate; else the first acknowledged cohort (platform order).
+            guard let cohort = byAppliedRate.first(where: { $0.applied == quality.rate }) ?? byAppliedRate.first else { continue }
+            // Label with the APPLIED quality name, not the requested
+            // one: the server may answer rate 4 (蓝光4M) for a
+            // rate-0 (原画) request.
+            let appliedLabel = Self.label(forRate: cohort.applied, advertised: qualities) ?? quality.label
+            for stream in cohort.urls {
+                guard seenURLs.insert(stream.url.absoluteString).inserted else { continue }
+                // Two request rates can serve the same (quality,
+                // line) with different signatures — same file, same
+                // line. Keep the first; the picker shows one line.
+                guard seenQualityLines.insert("\(appliedLabel)|\(stream.line)").inserted else { continue }
+                var stream = stream
+                stream.quality = appliedLabel
+                stream.headers = headers
+                streams.append(stream)
+            }
+        }
+        return streams
     }
 
-    /// Encryption + the first (rate 0) play call, tried twice. The
-    /// first call also lists the CDN codes for the line matrix.
-    /// A transient failure on either call used to return [] with no
-    /// retry — the room then had no streams and no picture.
-    private func signedFirstPlay(roomID: String, did: String) async throws -> (Encryption, JSONValue) {
+    /// One signed getH5PlayV1 call (Pure Live's _requestPlayData):
+    /// 2 attempts; a failure drops the encryption cache so the
+    /// retry signs with a fresh descriptor (Pure Live's
+    /// ensureFreshSession(force: true)).
+    private func requestPlayData(roomID: String, rate: Int, cdn: String, did: String) async throws -> JSONValue {
         var lastError: (any Error)?
-        for _ in 0..<2 {
+        for attempt in 0..<2 {
             do {
-                let enc = try await encryption(did: did)
-                let first = try await playV1(roomID: roomID, rate: 0, cdn: "", did: did, enc: enc)
-                return (enc, first)
+                let enc = try await encryption(did: did, forceRefresh: attempt > 0)
+                return try await playV1(roomID: roomID, rate: rate, cdn: cdn, did: did, enc: enc)
             } catch {
                 lastError = error
+                Self.encryptionCache.drop()
             }
         }
         throw lastError ?? LiveSiteError.invalidResponse
     }
 
-    /// The device id the signing binds to. Pure Live's FIXED
-    /// default (douyu_utils.dart defaultDeviceId): the signing
-    /// and the play calls share one stable did, and the server
-    /// knows this one. A persisted random UUID used to be
-    /// generated here; the 2026-11-27 VM probe got error 0 from
-    /// getEncryption with the fixed did, and the play calls carry
-    /// the same did in their cookie.
-    private static func deviceID() -> String {
-        "10000000000000000000000000001501"
+    /// Pure Live's parsePlayQualities: the server's multirates list,
+    /// in advertised order; `rate` is an opaque request code,
+    /// `name` the server's label. Falls back to a single quality
+    /// from the response's own rate when multirates is absent.
+    struct DiscoveredQuality: Sendable {
+        var rate: Int
+        var label: String
     }
 
-    private func encryption(did: String) async throws -> Encryption {
-        let json = try await http.getJSON("\(Self.webBase)/wgapi/livenc/liveweb/websec/getEncryption?did=\(did)")
-        guard let enc = Self.encryption(fromJSON: json) else { throw LiveSiteError.invalidResponse }
+    static func qualities(fromPlayData data: JSONValue) -> [DiscoveredQuality] {
+        var out: [DiscoveredQuality] = []
+        for item in data["multirates"].arrayValue {
+            guard let rate = item["rate"].intValue else { continue }
+            let name = item["name"].stringValue?.trimmingCharacters(in: .whitespaces) ?? ""
+            guard !out.contains(where: { $0.rate == rate }) else { continue }
+            out.append(DiscoveredQuality(rate: rate, label: name.isEmpty ? fallbackLabel(forRate: rate) : name))
+        }
+        if out.isEmpty {
+            let rate = data["rate"].intValue ?? -1
+            out.append(DiscoveredQuality(rate: rate, label: fallbackLabel(forRate: rate)))
+        }
+        return out
+    }
+
+    /// Server-rate -> label when the multirates entry carries no
+    /// name. Verified live 2026-11-28 (room 24422): 0 原画, 4
+    /// 蓝光4M, 3 超清, 2 高清 — and NO rate 1 (build 10's "流畅"
+    /// was invented; a rate-1 request answers rate 2). The
+    /// multirates `name` field is authoritative; this is only the
+    /// fallback.
+    static func fallbackLabel(forRate rate: Int) -> String {
+        switch rate {
+        case 4: return "蓝光4M"
+        case 3: return "超清"
+        case 2: return "高清"
+        case 0: return "原画"
+        default: return "原画"
+        }
+    }
+
+    static func label(forRate rate: Int, advertised: [DiscoveredQuality]) -> String? {
+        advertised.first(where: { $0.rate == rate })?.label ?? fallbackLabel(forRate: rate)
+    }
+
+    /// The rate the server actually served (Pure Live's
+    /// resolvePlayUrl reads playData['rate']). Nil when the
+    /// response carries no numeric rate.
+    static func appliedRate(fromPlayResponse json: JSONValue) -> Int? {
+        guard let rate = json["data"]["rate"].intValue, rate >= 0 else { return nil }
+        return rate
+    }
+
+    private func encryption(did: String, forceRefresh: Bool = false) async throws -> Encryption {
+        try await Self.encryptionCache.encryption(did: did, forceRefresh: forceRefresh) {
+            try await Self.fetchEncryption(did: did)
+        }
+    }
+
+    private static func fetchEncryption(did: String) async throws -> Encryption {
+        let json = try await HTTPClient.shared.getJSON(
+            "\(webBase)/wgapi/livenc/liveweb/websec/getEncryption?did=\(did)",
+            headers: requestHeaders(roomID: "", did: did)
+        )
+        guard let enc = encryption(fromJSON: json) else { throw LiveSiteError.invalidResponse }
         return enc
+    }
+
+    /// Pure Live's DouyuUtils.requestHeaders: UA Chrome/128
+    /// Windows, Accept, Accept-Language, Origin, Referer, Cookie
+    /// (dy_did + acf_did). Build 10 sent NO headers on the
+    /// encryption call and no User-Agent on the play call.
+    private static func requestHeaders(roomID: String, did: String) -> [String: String] {
+        [
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+            "Origin": webBase,
+            "Referer": roomID.isEmpty ? "\(webBase)/" : "\(webBase)/\(roomID)",
+            "User-Agent": PlaybackHeaders.douyuUA,
+            "Cookie": "dy_did=\(did); acf_did=\(did)",
+        ]
     }
 
     /// Pure parser for a getEncryption response. Testable without the network.
@@ -284,19 +454,13 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
             "ver": "Douyu_new",
             "iar": "0",
         ]
-        let headers = [
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
-            "Referer": "\(Self.webBase)/\(roomID)",
-            "Origin": Self.webBase,
-            "Cookie": "dy_did=\(did); acf_did=\(did)",
-        ]
-        return try await http.postFormJSON("\(Self.webBase)/lapi/live/getH5PlayV1/\(roomID)", fields: fields, headers: headers)
+        return try await http.postFormJSON("\(Self.webBase)/lapi/live/getH5PlayV1/\(roomID)", fields: fields, headers: Self.requestHeaders(roomID: roomID, did: did))
     }
 
-    /// Pure parser for the CDN line codes (Pure Live's parseCdnCodes):
-    /// cdnsWithName[].cdn, with the current rtmp_cdn first; [""] when
-    /// the server lists none. Testable without the network.
+    /// Pure parser for the CDN line codes (Pure Live's parseCdnCodes
+    /// + the scdn-last sort in getPlayQualites): cdnsWithName[].cdn,
+    /// with the current rtmp_cdn first; [""] when the server lists
+    /// none. Testable without the network.
     static func cdnCodes(fromPlayResponse json: JSONValue) -> [String] {
         var codes: [String] = []
         for item in json["data"]["cdnsWithName"].arrayValue {
@@ -307,22 +471,27 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
         if let current = json["data"]["rtmp_cdn"].stringValue, !current.isEmpty, !codes.contains(current) {
             codes.insert(current, at: 0)
         }
+        // scdn-* lines last (Pure Live sorts them after the
+        // platform CDNs in getPlayQualites).
+        codes.sort { a, b in
+            if a.hasPrefix("scdn") != b.hasPrefix("scdn") { return !a.hasPrefix("scdn") }
+            return false
+        }
         return codes.isEmpty ? [""] : codes
     }
 
-    /// Pure parser for one getH5PlayV1 response. Prefers hls_url when
-    /// the server offers it; otherwise builds the FLV URL from
-    /// rtmp_url + rtmp_live. Testable without the network. The
-    /// stream carries its lease: the `expire` query value is
-    /// RELATIVE seconds from issuance (Pure Live's
+    /// Pure parser for one getH5PlayV1 response (Pure Live's
+    /// parsePlayUrl — no hls_url branch: Douyu's web API returns
+    /// no hls_url at any rate or CDN). Builds the FLV URL from
+    /// rtmp_live (complete signed address when present) or
+    /// rtmp_url / flv_url + rtmp_live. Testable without the
+    /// network. The stream carries its lease: the `expire` query
+    /// value is RELATIVE seconds from issuance (Pure Live's
     /// getPlayUrlInvalidAt), so the service can refresh before the
     /// CDN closes the line mid-stream.
     static func stream(fromPlayResponse json: JSONValue, quality: String, line: String) -> PlayStream? {
         guard json["error"].intValue == 0 else { return nil }
         let data = json["data"]
-        if let hls = data["hls_url"].stringValue, !hls.isEmpty, let url = URL(string: hls) {
-            return PlayStream(url: url, quality: quality, line: line, expiresAt: Self.expiresAt(fromURLString: hls))
-        }
         guard var urlString = Self.playURL(fromPlayData: data) else { return nil }
         // Pure Live: 5-minute ws lines (expire=300&fcdn=ws) die
         // mid-stream; appending expire=0 makes the CDN issue its
@@ -410,8 +579,8 @@ final class DouyuSite: LiveSite, @unchecked Sendable {
             roomID: roomID,
             title: item["room_name"].stringValue ?? "",
             anchorName: item["nickname"].stringValue ?? item["owner_name"].stringValue ?? "",
-            anchorAvatarURL: URL(string: item["avatar"].stringValue ?? ""),
-            coverURL: URL(string: HaoText.firstNonEmpty(item["room_src"].stringValue, item["room_thumb"].stringValue) ?? ""),
+            anchorAvatarURL: Self.imageURL(item["avatar"].stringValue),
+            coverURL: Self.imageURL(HaoText.firstNonEmpty(item["room_src"].stringValue, item["room_thumb"].stringValue)),
             categoryName: item["cate_name"].stringValue,
             viewerCount: item["online"].intValue ?? item["hn"].intValue ?? 0,
             isLive: true

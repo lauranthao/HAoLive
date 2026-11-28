@@ -46,6 +46,7 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 import Foundation
+import os
 import UIKit
 
 /// One render slot: a CVPixelBuffer + the GL texture + FBO bound to it.
@@ -144,10 +145,39 @@ private final class GLFrameSlot {
 /// The GPU renderer. Created by MpvPlayerEngine on device when
 /// EAGL is available; nil when it is not (simulator / EAGL failure)
 /// — the engine then uses the software renderer.
+///
+/// BUILD 11 — the failure used to be silent: init returned nil
+/// with no log and no reason anywhere, so a phone that cannot
+/// build EAGL fell back to the software renderer unnoticed — the
+/// likely cause of 原画 lag on all platforms (chen 2026-11-28:
+/// every platform lags at 原画). Every failure point now records
+/// its reason (lastFailureReason + os log) so the engine can say
+/// which path is active, and a dead slot pool reports through
+/// onStalled instead of sitting on a permanent black screen.
 final class MpvGLRenderer {
+    /// Last GL construction / slot failure, for diagnostics.
+    /// Lock-guarded: written from init (main) and the GL queue.
+    private static let failureLock = NSLock()
+    nonisolated(unsafe) private static var _lastFailureReason: String?
+    static var lastFailureReason: String? {
+        failureLock.lock()
+        defer { failureLock.unlock() }
+        return _lastFailureReason
+    }
+
+    static func recordFailure(_ reason: String) {
+        failureLock.lock()
+        _lastFailureReason = reason
+        failureLock.unlock()
+        Logger(subsystem: "live.haostudio", category: "gl").error("GL renderer failed: \(reason, privacy: .public)")
+    }
+
     /// Failable: nil when no EAGL context can be made.
     init?(handle: OpaquePointer, displayLayer: AVSampleBufferDisplayLayer, onFirstFrame: @escaping () -> Void) {
-        guard let context = EAGLContext(api: .openGLES3) else { return nil }
+        guard let context = EAGLContext(api: .openGLES3) else {
+            Self.recordFailure("EAGLContext(OpenGL ES 3) 创建失败")
+            return nil
+        }
         self.context = context
         self.handle = handle
         self.displayLayer = displayLayer
@@ -155,7 +185,10 @@ final class MpvGLRenderer {
         var cache: CVOpenGLESTextureCache?
         guard CVOpenGLESTextureCacheCreate(
             kCFAllocatorDefault, nil, context, nil, &cache
-        ) == kCVReturnSuccess, let cache else { return nil }
+        ) == kCVReturnSuccess, let cache else {
+            Self.recordFailure("CVOpenGLESTextureCache 创建失败")
+            return nil
+        }
         self.textureCache = cache
         guard createRenderContext() else { return nil }
     }
@@ -181,6 +214,12 @@ final class MpvGLRenderer {
     private nonisolated(unsafe) var lastPTS: CMTime = .invalid
     private nonisolated(unsafe) var firstFrameReported = false
     private nonisolated(unsafe) var tornDown = false
+    /// Fired once (GL queue) when the renderer is permanently
+    /// black: video size known, render context live, but no FBO
+    /// slots. The engine fails the attempt so the service sweeps
+    /// on instead of sitting on a black screen until the watchdog.
+    nonisolated(unsafe) var onStalled: (() -> Void)?
+    private nonisolated(unsafe) var stallReported = false
 
     /// Cap: the GPU renders at native video size up to 1080p; the
     /// CPU never sees these pixels either way.
@@ -198,6 +237,14 @@ final class MpvGLRenderer {
     /// callback resolves GL symbols from the com.apple.opengles
     /// bundle, exactly as media_kit's TextureHW does.
     private func createRenderContext() -> Bool {
+        // The get_proc_address closure cannot capture (it becomes a
+        // C function pointer), so the bundle check happens up front
+        // instead of inside it — a missing bundle used to fail
+        // silently here with no reason recorded.
+        guard CFBundleGetBundleWithIdentifier("com.apple.opengles" as CFString) != nil else {
+            Self.recordFailure("com.apple.opengles bundle 未找到（GL 符号解析失败）")
+            return false
+        }
         var procAddress = mpv_opengl_init_params(
             get_proc_address: { _, name in
                 guard let name else { return nil }
@@ -222,7 +269,10 @@ final class MpvGLRenderer {
         let result = params.withUnsafeMutableBufferPointer { buffer in
             mpv_render_context_create(&created, handle, buffer.baseAddress)
         }
-        guard result == 0, let created else { return false }
+        guard result == 0, let created else {
+            Self.recordFailure("mpv_render_context_create 失败（code \(result)）")
+            return false
+        }
         renderContext = created
         // passRetained: the callback borrows (takeUnretainedValue);
         // released in teardown after the context is freed.
@@ -271,15 +321,30 @@ final class MpvGLRenderer {
             guard let slot = GLFrameSlot(context: context, cache: textureCache, size: videoSize) else { break }
             slots.append(slot)
         }
+        if slots.isEmpty {
+            // Every slot failed: the next renderFrame would return
+            // forever (permanent black screen). Record it here; the
+            // stall report in renderFrame triggers the failover.
+            Self.recordFailure("recreateSlots 未建成任何 FBO（\(Int(videoSize.width))×\(Int(videoSize.height))）")
+        }
     }
 
     /// Runs on the GL queue. Renders one frame into the next slot's
     /// FBO and enqueues its pixel buffer to the display layer.
     private func renderFrame() {
         defer { renderPending = false }
-        guard !tornDown,
-              let renderCtx = renderContext,
-              !slots.isEmpty else { return }
+        guard !tornDown, let renderCtx = renderContext else { return }
+        guard !slots.isEmpty else {
+            // Video size known but no slots: the GPU path is dead.
+            // Report once so the engine fails over; without this
+            // every frame returned here and the room sat black
+            // until the watchdog fired on the same broken engine.
+            if videoSize.width > 0, videoSize.height > 0, !stallReported {
+                stallReported = true
+                onStalled?()
+            }
+            return
+        }
         let slot = slots[slotIndex]
         slotIndex = (slotIndex + 1) % slots.count
 

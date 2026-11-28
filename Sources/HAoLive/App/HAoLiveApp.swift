@@ -54,6 +54,12 @@ struct HAoLiveApp: App {
                 .environmentObject(historyStore)
                 .environmentObject(settingsStore)
                 .preferredColorScheme(colorScheme)
+                .onAppear {
+                    // Pure Live applies a separate cellular default
+                    // quality; the monitor must be running before
+                    // any room opens.
+                    NetworkTypeMonitor.shared.start()
+                }
         }
     }
 

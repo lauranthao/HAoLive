@@ -1,7 +1,7 @@
 // RoomSearchMerger.swift
 // HAo Live — cross-platform search merge (HAo's own layer).
 // Searches run per platform; this merges them: platform order
-// (Bilibili, Douyu, Huya, Douyin, Kuaishou), deduped by anchor+title.
+// (SiteRegistry order), deduped by anchor+title.
 
 import Foundation
 

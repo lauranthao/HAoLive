@@ -19,17 +19,17 @@ struct CategoryRoomsView: View {
     var body: some View {
         ScrollView {
             if isLoading {
-                ProgressView().padding(.top, 40)
+                ProgressView().padding(.top, HaoLiveDesign.emptyStateTopPadding)
             } else if let error = roomsError, rooms.isEmpty {
                 VStack(spacing: 12) {
                     ContentUnavailableView("加载失败", systemImage: "wifi.exclamationmark", description: Text(error))
                     Button("重试") { Task { await loadRooms(reset: true) } }
                         .buttonStyle(.bordered)
                 }
-                .padding(.top, 40)
+                .padding(.top, HaoLiveDesign.emptyStateTopPadding)
             } else if rooms.isEmpty {
                 ContentUnavailableView("这个分区暂无房间", systemImage: "square.grid.2x2")
-                    .padding(.top, 40)
+                    .padding(.top, HaoLiveDesign.emptyStateTopPadding)
             } else {
                 RoomGrid(rooms: rooms)
                     .padding(HaoLiveDesign.pagePadding)

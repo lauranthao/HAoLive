@@ -10,6 +10,7 @@ struct HistoryView: View {
     @EnvironmentObject private var historyStore: HistoryStore
 
     @State private var visibleCount = 30
+    @State private var showingClearConfirm = false
 
     private let pageSize = 30
 
@@ -66,9 +67,20 @@ struct HistoryView: View {
         .toolbar {
             if !historyStore.entries.isEmpty {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("清空历史") { historyStore.clear() }
+                    Button("清空历史") { showingClearConfirm = true }
                 }
             }
+        }
+        // Destructive actions confirm first (HAoMusic: delete
+        // actions always ask), then toast the result.
+        .alert("清空历史？", isPresented: $showingClearConfirm) {
+            Button("清空", role: .destructive) {
+                historyStore.clear()
+                ToastCenter.shared.show("已清空历史")
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将删除全部观看历史记录")
         }
     }
 }
