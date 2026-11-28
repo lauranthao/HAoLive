@@ -50,6 +50,13 @@ final class SettingsStore: ObservableObject {
     @Published var hwdecMode: String = "auto-safe" {
         didSet { save() }
     }
+    /// Show the on-screen diagnostics tag (render path + decoder +
+    /// hwdec mode + buffer + speed + drops) on the video. Build 19:
+    /// chen asked for a switch for it. Default on — the tag is the
+    /// only way to see the render path on the device.
+    @Published var showDiagnostics: Bool = true {
+        didSet { save() }
+    }
 
     // MARK: - Danmaku (Pure Live's DanmakuSettingsController, subset)
     @Published var danmakuEnabled: Bool = true {
@@ -109,6 +116,7 @@ final class SettingsStore: ObservableObject {
         var preferredQualityCellular: String = "原画"
         var preferredLine: String = ""
         var hwdecMode: String = "auto-safe"
+        var showDiagnostics: Bool = true
         var danmakuEnabled: Bool = true
         var danmakuFontSize: Double = 14
         var danmakuOpacity: Double = 0.9
@@ -152,6 +160,7 @@ final class SettingsStore: ObservableObject {
         preferredQualityCellular = decoded.preferredQualityCellular.isEmpty ? "原画" : decoded.preferredQualityCellular
         preferredLine = decoded.preferredLine
         hwdecMode = decoded.hwdecMode == "auto" ? "auto-safe" : decoded.hwdecMode
+        showDiagnostics = decoded.showDiagnostics
         danmakuEnabled = decoded.danmakuEnabled
         danmakuFontSize = decoded.danmakuFontSize
         danmakuOpacity = decoded.danmakuOpacity
@@ -175,6 +184,7 @@ final class SettingsStore: ObservableObject {
             preferredQualityCellular: preferredQualityCellular,
             preferredLine: preferredLine,
             hwdecMode: hwdecMode,
+            showDiagnostics: showDiagnostics,
             danmakuEnabled: danmakuEnabled,
             danmakuFontSize: danmakuFontSize,
             danmakuOpacity: danmakuOpacity,

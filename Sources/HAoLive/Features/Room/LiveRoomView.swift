@@ -128,6 +128,7 @@ struct LiveRoomView: View {
                 danmakuStrokeEnabled: settingsStore.danmakuStrokeEnabled,
                 danmakuStrokeWidth: settingsStore.danmakuStrokeWidth,
                 danmakuMaxVisibleCount: settingsStore.danmakuMaxVisibleCount,
+                showDiagnostics: settingsStore.showDiagnostics,
                 streams: streams,
                 isFavorite: favoritesStore.isFavorite(room),
                 onToggleFavorite: { toggleFavorite() },
@@ -253,7 +254,7 @@ struct LiveRoomView: View {
 
     private var playerArea: some View {
         ZStack {
-            PlayerContainerView(service: playerService)
+            PlayerContainerView(service: playerService, active: !isFullscreen)
                 .aspectRatio(16.0 / 9.0, contentMode: .fit)
                 .background(.black)
             if settingsStore.danmakuEnabled {
@@ -361,15 +362,18 @@ struct LiveRoomView: View {
             // with the auto-hiding chrome and was truncated to
             // 140 pt — chen's "没有tag". It now sits on the video
             // itself, always visible, full text, never intercepting
-            // touches. Same pill inline and fullscreen.
-            VStack {
-                DiagnosticTagPill(engineName: playerService.engineName)
-                    .padding(.top, 64)
-                    .padding(.leading, 12)
-                Spacer()
+            // touches. Same pill inline and fullscreen. Build 19:
+            // gated by the 显示数据 setting.
+            if settingsStore.showDiagnostics {
+                VStack {
+                    DiagnosticTagPill(engineName: playerService.engineName)
+                        .padding(.top, 64)
+                        .padding(.leading, 12)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .allowsHitTesting(false)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .allowsHitTesting(false)
         }
         .contentShape(Rectangle())
         .onGeometryChange(for: CGSize.self) { $0.size } action: { videoSize = $0 }
@@ -789,14 +793,42 @@ struct LiveRoomView: View {
 /// Embeds LivePlayerService.videoContainerView. Inline and fullscreen
 /// never mount it at the same time, so the same UIView moves between
 /// them — exactly how the old AVPlayer VideoPlayer was swapped.
+///
+/// Build 19 — fullscreen-exit black screen: the old code returned
+/// the service's one videoContainerView directly from makeUIView,
+/// so the inline and fullscreen mounts SHARED one UIView. When the
+/// fullscreen cover was dismissed, SwiftUI dismantled its mount and
+/// the shared view was left with no superview — the inline player
+/// showed black (chrome and tag still live, video gone) and the
+/// empty updateUIView never put it back. Each mount now owns a
+/// fresh wrapper; updateUIView re-attaches the shared container to
+/// the active mount's wrapper whenever it is not where it belongs.
+/// `active` is false for the inline mount while the cover is up,
+/// so it cannot steal the container back from fullscreen.
 struct PlayerContainerView: UIViewRepresentable {
     let service: LivePlayerService
+    let active: Bool
 
     func makeUIView(context: Context) -> UIView {
-        service.videoContainerView
+        let wrapper = UIView()
+        wrapper.backgroundColor = .black
+        return wrapper
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {}
+    func updateUIView(_ wrapper: UIView, context: Context) {
+        guard active else { return }
+        let container = service.videoContainerView
+        guard container.superview !== wrapper else { return }
+        container.removeFromSuperview()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(container)
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor),
+            container.topAnchor.constraint(equalTo: wrapper.topAnchor),
+            container.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
+        ])
+    }
 }
 
 // MARK: - Loading / failure placeholder (Pure Live's RoomLoadFailedWidget)
@@ -1026,6 +1058,7 @@ private struct DiagnosticTagPill: View {
                 .font(.caption2.monospaced())
                 .foregroundStyle(.white.opacity(0.85))
                 .lineLimit(1)
+                .minimumScaleFactor(0.7)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(.black.opacity(0.5), in: Capsule())
@@ -1214,6 +1247,7 @@ struct FullscreenPlayerView: View {
     var danmakuStrokeEnabled: Bool = true
     var danmakuStrokeWidth: Double = 1.5
     var danmakuMaxVisibleCount: Int = 48
+    var showDiagnostics: Bool = true
     var streams: [PlayStream]
     var isFavorite: Bool
     var onToggleFavorite: () -> Void
@@ -1238,7 +1272,7 @@ struct FullscreenPlayerView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            PlayerContainerView(service: playerService)
+            PlayerContainerView(service: playerService, active: true)
                 .ignoresSafeArea()
             if danmakuEnabled {
                 DanmakuOverlayView(
@@ -1350,14 +1384,17 @@ struct FullscreenPlayerView: View {
             }
             // Persistent diagnostics pill (build 17) — same as the
             // inline player: always on the video, full text.
-            VStack {
-                DiagnosticTagPill(engineName: playerService.engineName)
-                    .padding(.top, 64)
-                    .padding(.leading, 12)
-                Spacer()
+            // Build 19: gated by the 显示数据 setting.
+            if showDiagnostics {
+                VStack {
+                    DiagnosticTagPill(engineName: playerService.engineName)
+                        .padding(.top, 64)
+                        .padding(.leading, 12)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .allowsHitTesting(false)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .allowsHitTesting(false)
         }
         .contentShape(Rectangle())
         .onGeometryChange(for: CGSize.self) { $0.size } action: { videoSize = $0 }

@@ -671,7 +671,7 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
     /// a web_rid (enter API, then HTML).
     private func roomInfo(for roomID: String) async throws -> JSONValue {
         if let cached = Self.cachedRoomInfo(for: roomID) { return cached }
-        let info: JSONValue
+        var info: JSONValue
         if Self.isRoomID(roomID) {
             // 19-digit internal id (the ids feed/category return):
             // reflow/info — Pure Live's ByRoomId route. The room
@@ -696,8 +696,38 @@ final class DouyinSite: LiveSite, @unchecked Sendable {
             }
             info = roomInfo
         }
+        // Build 19: prefer reflow/info's stream for rooms opened by
+        // web_rid. The enter/HTML route's stream_url is the same
+        // shape, but the reflow endpoint's is verified live (EQ118:
+        // FLV + HLS both 200, room live with 155k viewers) while the
+        // enter route's stream failed to open on the device
+        // ("loading failed" on every candidate). A reflow failure
+        // keeps the enter stream.
+        if !Self.isRoomID(roomID) {
+            info = await enrichStreamFromReflow(info)
+        }
         Self.storeRoomInfo(info, for: roomID)
         return info
+    }
+
+    /// Replace the room's stream_url with reflow/info's when the
+    /// room's internal 19-digit id is known. Returns the input
+    /// unchanged when the id is missing or reflow fails/returns no
+    /// stream.
+    private func enrichStreamFromReflow(_ info: JSONValue) async -> JSONValue {
+        let room = info["room"]
+        let internalID = room["id_str"].stringValue ?? room["id"].stringValue ?? ""
+        guard Self.isRoomID(internalID),
+              let reflow = try? await roomInfoFromReflow(roomID: internalID),
+              !reflow["room"]["stream_url"].isNull else { return info }
+        var roomDict = room.objectValue
+        roomDict["stream_url"] = reflow["room"]["stream_url"]
+        return .object([
+            "room": .object(roomDict),
+            "anchor": info["anchor"],
+            "web_stream_url": reflow["room"]["stream_url"],
+            "room_status": info["room_status"],
+        ])
     }
 
     /// reflow/info — Pure Live's ByRoomId route

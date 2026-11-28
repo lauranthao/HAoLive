@@ -43,6 +43,15 @@ enum LivePlatform: String, CaseIterable, Codable, Hashable, Sendable {
     case seventeenlive
     case kick
 
+    /// The bundled platform logo asset (the platform's own brand
+    /// mark, from Pure Live's platform assets). seventeenlive's file
+    /// is named 17live.png upstream. The view falls back to the
+    /// colored dot + text when the image is absent.
+    var logoAssetName: String {
+        let file = self == .seventeenlive ? "17live" : rawValue
+        return "platform-\(file)"
+    }
+
     var displayName: String {
         switch self {
         case .bilibili: return "哔哩哔哩"

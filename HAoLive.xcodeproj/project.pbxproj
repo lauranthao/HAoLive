@@ -110,11 +110,15 @@
 		41E2CA19008E4095446DFDD3 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
 		8209D3F5A6F84A50E183D1C4 = {isa = PBXBuildFile; fileRef = 41E2CA19008E4095446DFDD3; };
 		128876BA9CB203F0B32BD069 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		1F4A9C02D7E511AA88B0C3D1 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutView.swift; sourceTree = "<group>"; };
 		5B33481624F92B96350984A9 = {isa = PBXBuildFile; fileRef = 128876BA9CB203F0B32BD069; };
+		1F4A9C02D7E511AA88B0C3D2 = {isa = PBXBuildFile; fileRef = 1F4A9C02D7E511AA88B0C3D1; };
 		AB14EAB4053A91556FE61A1A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DanmakuOverlayView.swift; sourceTree = "<group>"; };
 		0D40596E74CCDE7CD3E1C01E = {isa = PBXBuildFile; fileRef = AB14EAB4053A91556FE61A1A; };
 		0FAFE1FB4EFC8A9AFB3E6469 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityPickerView.swift; sourceTree = "<group>"; };
+		1F4A9C02D7E511AA88B0C3D3 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformLogo.swift; sourceTree = "<group>"; };
 		8A0F735D55186E041D5AFAF2 = {isa = PBXBuildFile; fileRef = 0FAFE1FB4EFC8A9AFB3E6469; };
+		1F4A9C02D7E511AA88B0C3D4 = {isa = PBXBuildFile; fileRef = 1F4A9C02D7E511AA88B0C3D3; };
 		2309B3716923971CC587AAC9 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokens.swift; sourceTree = "<group>"; };
 		D45767DE9BE5EFBAF1322F33 = {isa = PBXBuildFile; fileRef = 2309B3716923971CC587AAC9; };
 		E17880A312A4AE0F1F118119 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -433,6 +437,7 @@
 			isa = PBXGroup;
 			children = (
 				128876BA9CB203F0B32BD069,
+				1F4A9C02D7E511AA88B0C3D1,
 			);
 			name = Settings;
 			path = Settings;
@@ -443,6 +448,7 @@
 			children = (
 				AB14EAB4053A91556FE61A1A,
 				0FAFE1FB4EFC8A9AFB3E6469,
+				1F4A9C02D7E511AA88B0C3D3,
 			);
 			name = Shared;
 			path = Shared;
@@ -566,8 +572,10 @@
 				CCB32786AC313A044440493E,
 				8209D3F5A6F84A50E183D1C4,
 				5B33481624F92B96350984A9,
+				1F4A9C02D7E511AA88B0C3D2,
 				0D40596E74CCDE7CD3E1C01E,
 				8A0F735D55186E041D5AFAF2,
+				1F4A9C02D7E511AA88B0C3D4,
 				D45767DE9BE5EFBAF1322F33,
 				8B2C3D4E5F60718293A4B5C6,
 				8B2C3D4E5F60718293A4B5C7,

@@ -85,9 +85,7 @@ struct CategoriesView: View {
                         selectedPlatform = platform
                     } label: {
                         HStack(spacing: 6) {
-                            Circle()
-                                .fill(Color(hex: platform.colorHex))
-                                .frame(width: 8, height: 8)
+                            PlatformLogo(platform: platform, size: 18)
                             Text(platform.shortName)
                                 .font(.subheadline.weight(.semibold))
                         }

@@ -29,7 +29,8 @@
 //   the server may answer a different rate than requested — the
 //   UI shows what was actually served (applied rate), never the
 //   requested label.
-// Danmaku: raw TCP to openbarrage.douyutv.com:8601 (STT protocol);
+// Danmaku: WebSocket to danmuproxy.douyu.com:8506 (STT protocol);
+// the old raw-TCP barrage server is dead (build 19).
 // the VM's egress proxy blocks raw TCP, so the channel is verified
 // by fixtures only — it runs on the user's phone, not through here.
 

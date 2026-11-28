@@ -1,8 +1,8 @@
 // DanmakuSocket.swift
 // HAo Live — one socket abstraction for every danmaku channel.
-// Bilibili/Douyin/Kuaishou/Huya speak WebSocket; Douyu speaks raw TCP.
-// The decoders only ever see Data, so the Linux harness can drive them
-// with a scripted socket instead of a real connection.
+// Bilibili/Douyin/Kuaishou/Huya/Douyu speak WebSocket; the decoders
+// only ever see Data, so the Linux harness can drive them with a
+// scripted socket instead of a real connection.
 
 import Foundation
 

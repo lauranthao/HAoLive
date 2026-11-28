@@ -77,6 +77,43 @@ enum LiveURLParser {
                                    "directory", "categories", "about", "download",
                                    "index", "live", "signup"]
 
+    /// Short-link hosts that redirect to the real room page.
+    private static let shortLinkHosts = ["v.douyin.com", "v.kuaishou.com", "b23.tv", "t.cn", "www.t.cn"]
+
+    /// The first URL in pasted text (a share message carries prose
+    /// around the link). Trailing punctuation — including Chinese
+    /// 。、，；：！？ — is trimmed so the URL parses.
+    static func extractURL(from text: String) -> URL? {
+        guard let range = text.range(of: #"https?://\S+"#, options: .regularExpression) else { return nil }
+        var candidate = String(text[range])
+        while let last = candidate.last, ".,;:!?。；：！？、）)］}」』】".contains(last) {
+            candidate.removeLast()
+        }
+        return URL(string: candidate)
+    }
+
+    /// Follow a short link to its target (URLSession follows the
+    /// redirects; a HEAD is enough — the target URL is all the
+    /// parser needs). Verified: v.douyin.com/… 302s to
+    /// webcast.amemv.com/douyin/webcast/reflow/{roomID}.
+    static func resolveShortLink(_ url: URL) async -> URL? {
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let finalURL = response.url else { return nil }
+        return finalURL
+    }
+
+    /// Parse a pasted link or share text: extract the URL, follow a
+    /// short link when needed, then parse the room out of it.
+    static func parseLink(_ text: String) async -> (platform: LivePlatform, roomID: String)? {
+        guard let url = extractURL(from: text) else { return nil }
+        if let parsed = parse(url.absoluteString) { return parsed }
+        guard let host = url.host?.lowercased(), shortLinkHosts.contains(host),
+              let resolved = await resolveShortLink(url) else { return nil }
+        return parse(resolved.absoluteString)
+    }
+
     static func parse(_ text: String) -> (platform: LivePlatform, roomID: String)? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed),
@@ -107,6 +144,14 @@ enum LiveURLParser {
         if isHost(host, domain: "douyin.com") {
             guard first.allSatisfy(\.isNumber) else { return nil }
             return (.douyin, first)
+        }
+        if host == "webcast.amemv.com" {
+            // Douyin share short links resolve here:
+            // /douyin/webcast/reflow/{19-digit room id}.
+            guard segments.count >= 4, segments[0] == "douyin",
+                  segments[1] == "webcast", segments[2] == "reflow",
+                  segments[3].allSatisfy(\.isNumber) else { return nil }
+            return (.douyin, segments[3])
         }
         if isHost(host, domain: "kuaishou.com") {
             // live.kuaishou.com/u/{id}

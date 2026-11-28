@@ -71,7 +71,7 @@ struct HotView: View {
                     selectedPlatform = nil
                 }
                 ForEach(LivePlatform.allCases, id: \.self) { platform in
-                    chip(title: platform.shortName, selected: selectedPlatform == platform) {
+                    platformChip(platform: platform, selected: selectedPlatform == platform) {
                         selectedPlatform = platform
                     }
                 }
@@ -87,6 +87,19 @@ struct HotView: View {
                 .font(.subheadline.weight(.semibold))
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
+        }
+        .buttonStyle(.chip(isSelected: selected))
+    }
+
+    private func platformChip(platform: LivePlatform, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                PlatformLogo(platform: platform, size: 18)
+                Text(platform.shortName)
+                    .font(.subheadline.weight(.semibold))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
         }
         .buttonStyle(.chip(isSelected: selected))
     }

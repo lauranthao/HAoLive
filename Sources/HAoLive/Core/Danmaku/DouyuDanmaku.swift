@@ -1,6 +1,11 @@
 // DouyuDanmaku.swift
 // HAo Live — Douyu danmaku channel, re-implemented from the public
-// STT text protocol over raw TCP (openbarrage.douyutv.com:8601).
+// STT text protocol over WebSocket (Pure Live's DouyuApi.danmakuServer:
+// wss://danmuproxy.douyu.com:8506). Build 19: the old raw-TCP route
+// (openbarrage.douyutv.com:8601) is dead — the server RSTs the
+// connection on login (verified live against a 33M-viewer room, 0
+// messages), so no Douyu room showed any danmaku. The STT packets
+// are unchanged; only the transport and the heartbeat changed.
 //
 // Wire packet (12-byte header + body + NUL):
 //   [length u32 LE][length u32 LE][type u16 LE = 689]
@@ -13,14 +18,14 @@
 //
 // Messages: loginreq (type@=loginreq/roomid@={id}/),
 // joingroup (type@=joingroup/rid@={id}/gid@=-9999/),
-// keeplive (type@=keeplive/tick@={unix}/),
+// mrkl (type@=mrkl/ heartbeat),
 // chatmsg carries nn@= (user) and txt@= (text).
 
 import Foundation
 
 enum DouyuDanmaku {
-    static let defaultHost = "openbarrage.douyutv.com"
-    static let defaultPort = 8601
+    /// Pure Live's danmaku server (DouyuApi.danmakuServer).
+    static let danmakuServer = "wss://danmuproxy.douyu.com:8506"
     static let heartbeatIntervalSeconds: UInt64 = 45
 
     // MARK: - STT text
@@ -76,7 +81,7 @@ enum DouyuDanmaku {
     }
 
     static func keepalivePacket() -> Data {
-        packet(encode([("type", "keeplive"), ("tick", String(Int(Date().timeIntervalSince1970)))]))
+        packet(encode([("type", "mrkl")]))
     }
 
     /// Split received bytes into complete STT messages. Returns the
@@ -120,13 +125,15 @@ enum DouyuDanmaku {
         )
     }
 
-#if canImport(Network)
-    /// Live stream of danmaku for a room over the TCP barrage server.
+#if !os(Linux)
+    /// Live stream of danmaku for a room over the WebSocket barrage
+    /// server (Pure Live's DouyuDanmakuConnection: one anonymous
+    /// WebSocket, join packets on open, `mrkl` heartbeat every 45 s).
     static func stream(roomID: String) -> AsyncStream<DanmakuItem> {
         AsyncStream { continuation in
             let task = Task {
-                let socket: any DanmakuSocket = TCPTransport()
-                let url = URL(string: "tcp://\(defaultHost):\(defaultPort)")!
+                let socket: any DanmakuSocket = WebSocketTransport()
+                let url = URL(string: danmakuServer)!
                 do {
                     try await socket.connect(url: url, headers: [:])
                     try await socket.send(loginPacket(roomID: roomID))

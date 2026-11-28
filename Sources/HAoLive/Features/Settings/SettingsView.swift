@@ -44,6 +44,13 @@ struct SettingsView: View {
         return "\(version) (\(build))"
     }
 
+    private var aboutInfo: HAoLiveAboutInfo {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return HAoLiveAboutInfo(version: version, build: build)
+    }
+
     private let historyLimits = [20, 50, 100, 200, 500]
 
     var body: some View {
@@ -80,6 +87,7 @@ struct SettingsView: View {
                     Text("自动（安全）").tag("auto-safe")
                     Text("关闭").tag("no")
                 }
+                Toggle("显示数据", isOn: $settingsStore.showDiagnostics)
             }
 
             Section("弹幕") {
@@ -173,14 +181,8 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("关于") {
-                LabeledContent("版本", value: appVersionText)
+            AboutSections(info: aboutInfo) {
                 updateRow
-                NavigationLink("更新日志") { ChangelogView() }
-                NavigationLink("开源许可与致谢") { LicensesView() }
-                Text("HAo Live 参考 Pure Live 的功能设计，界面与实现均为 HAo 自己所写；不登录，不上传任何数据。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("设置")
@@ -247,10 +249,11 @@ struct SettingsView: View {
 
     // MARK: - Toolbox
 
-    /// A minimal room from a pasted link; LiveRoomView fetches the
-    /// real detail (title / host / live status) on entry.
-    private func roomFromLink(_ link: String) -> LiveRoom? {
-        guard let parsed = LiveURLParser.parse(link) else { return nil }
+    /// A minimal room from a pasted link or share text; LiveRoomView
+    /// fetches the real detail (title / host / live status) on entry.
+    /// The parse follows short links (v.douyin.com …), so it is async.
+    private func roomFromLink(_ link: String) async -> LiveRoom? {
+        guard let parsed = await LiveURLParser.parseLink(link) else { return nil }
         return LiveRoom(
             id: "\(parsed.platform.rawValue)-\(parsed.roomID)",
             platform: parsed.platform,
@@ -266,16 +269,19 @@ struct SettingsView: View {
     }
 
     private func openToolboxRoom() {
-        guard let room = roomFromLink(toolboxLink) else {
-            toolboxMessage = "链接无法识别：请粘贴哔哩哔哩、斗鱼、虎牙、抖音或快手的直播间链接"
-            return
+        Task {
+            toolboxMessage = "正在解析链接…"
+            guard let room = await roomFromLink(toolboxLink) else {
+                toolboxMessage = "链接无法识别：请粘贴哔哩哔哩、斗鱼、虎牙、抖音或快手的直播间链接"
+                return
+            }
+            toolboxMessage = nil
+            toolboxRoom = room
         }
-        toolboxMessage = nil
-        toolboxRoom = room
     }
 
     private func copyToolboxStreamLink() async {
-        guard let room = roomFromLink(toolboxLink),
+        guard let room = await roomFromLink(toolboxLink),
               let site = SiteRegistry.site(for: room.platform) else {
             toolboxMessage = "链接无法识别：请粘贴哔哩哔哩、斗鱼、虎牙、抖音或快手的直播间链接"
             return
@@ -293,66 +299,5 @@ struct SettingsView: View {
         } catch {
             toolboxMessage = "获取直链失败：\(error.localizedDescription)"
         }
-    }
-}
-
-/// This app's own release notes (what changed in each build).
-private struct ChangelogView: View {
-    var body: some View {
-        List {
-            Section("0.1.0 build 7") {
-                Text("收藏实时更新、标签与排序；热门/分类/搜索分页；弹幕滚动 lanes 与完整设置；工具箱；历史按条数保留。")
-            }
-            Section("0.1.0 build 6") {
-                Text("mpv 播放器（系统播放器兜底）；虎牙/斗鱼/快手/抖音线路按 Pure Live 重写。")
-            }
-            Section("0.1.0 build 5") {
-                Text("各站签名线路、封面加载、全屏横屏；虎牙/快手弹幕。")
-            }
-            Section("0.1.0 build 4") {
-                Text("首版：五站推荐、分类、搜索、收藏、历史。")
-            }
-        }
-        .navigationTitle("更新日志")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-/// Third-party code this app builds on, and its licenses.
-private struct LicensesView: View {
-    private struct Entry {
-        var name: String
-        var license: String
-        var url: String
-    }
-
-    private let entries = [
-        Entry(name: "Pure Live", license: "AGPL-3.0", url: "https://github.com/liuchuancong/pure_live"),
-        Entry(name: "MPVKit (libmpv)", license: "LGPL-3.0", url: "https://github.com/mpvkit/MPVKit"),
-    ]
-
-    var body: some View {
-        List(entries, id: \.name) { entry in
-            Button {
-                if let url = URL(string: entry.url) {
-                    UIApplication.shared.open(url)
-                }
-            } label: {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(entry.name)
-                        Text(entry.license)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .navigationTitle("开源许可与致谢")
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
